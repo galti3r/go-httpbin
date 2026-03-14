@@ -5,4 +5,4 @@ commonLabels:
 resources:
   - resources.yaml
 images:
-  - name: mccutchen/go-httpbin
+  - name: galti3r/go-httpbin

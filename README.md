@@ -3,10 +3,8 @@
 A reasonably complete and well-tested golang port of [Kenneth Reitz][kr]'s
 [httpbin][httpbin-org] service, with zero dependencies outside the go stdlib.
 
-[![GoDoc](https://pkg.go.dev/badge/github.com/mccutchen/go-httpbin/v2)](https://pkg.go.dev/github.com/mccutchen/go-httpbin/v2)
-[![Build status](https://github.com/mccutchen/go-httpbin/actions/workflows/ci.yaml/badge.svg)](https://github.com/mccutchen/go-httpbin/actions/workflows/ci.yaml)
-[![Coverage](https://codecov.io/gh/mccutchen/go-httpbin/branch/main/graph/badge.svg)](https://codecov.io/gh/mccutchen/go-httpbin)
-[![Docker Pulls](https://badgen.net/docker/pulls/mccutchen/go-httpbin?icon=docker&label=pulls)](https://hub.docker.com/r/mccutchen/go-httpbin/)
+[![GoDoc](https://pkg.go.dev/badge/github.com/galti3r/go-httpbin/v2)](https://pkg.go.dev/github.com/galti3r/go-httpbin/v2)
+[![Build status](https://github.com/galti3r/go-httpbin/actions/workflows/ci.yaml/badge.svg)](https://github.com/galti3r/go-httpbin/actions/workflows/ci.yaml)
 
 
 ## Usage
@@ -14,12 +12,10 @@ A reasonably complete and well-tested golang port of [Kenneth Reitz][kr]'s
 ### Docker/OCI images
 
 Prebuilt images for the `linux/amd64` and `linux/arm64` architectures are
-automatically published to these public registries for every tagged release:
-- [ghcr.io/mccutchen/go-httpbin][ghcr] (recommended)
-- [mccutchen/go-httpbin][docker-hub]
+automatically published to [GitHub Container Registry][ghcr] for every tagged release:
 
 ```bash
-$ docker run -P ghcr.io/mccutchen/go-httpbin
+$ docker run -P ghcr.io/galti3r/go-httpbin
 ```
 
 > [!NOTE]
@@ -30,7 +26,7 @@ $ docker run -P ghcr.io/mccutchen/go-httpbin
 ### Kubernetes
 
 ```
-$ kubectl apply -k github.com/mccutchen/go-httpbin/kustomize
+$ kubectl apply -k github.com/galti3r/go-httpbin/kustomize
 ```
 
 See `./kustomize` directory for further information
@@ -44,18 +40,18 @@ Examples:
 
 ```bash
 # Run http server
-$ go run github.com/mccutchen/go-httpbin/v2/cmd/go-httpbin@latest -host 127.0.0.1 -port 8081
+$ go run github.com/galti3r/go-httpbin/v2/cmd/go-httpbin@latest -host 127.0.0.1 -port 8081
 
 # Run https server
 $ openssl genrsa -out server.key 2048
 $ openssl ecparam -genkey -name secp384r1 -out server.key
 $ openssl req -new -x509 -sha256 -key server.key -out server.crt -days 3650
-$ go run github.com/mccutchen/go-httpbin/v2/cmd/go-httpbin@latest -host 127.0.0.1 -port 8081 -https-cert-file ./server.crt -https-key-file ./server.key
+$ go run github.com/galti3r/go-httpbin/v2/cmd/go-httpbin@latest -host 127.0.0.1 -port 8081 -https-cert-file ./server.crt -https-key-file ./server.key
 ```
 
 ### Unit testing helper library
 
-The `github.com/mccutchen/go-httpbin/httpbin/v2` package can also be used as a
+The `github.com/galti3r/go-httpbin/v2/httpbin` package can also be used as a
 library for testing an application's interactions with an upstream HTTP
 service, like so:
 
@@ -69,7 +65,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mccutchen/go-httpbin/v2/httpbin"
+	"github.com/galti3r/go-httpbin/v2/httpbin"
 )
 
 func TestSlowResponse(t *testing.T) {
@@ -109,12 +105,22 @@ variables (or a combination of the two):
 | `-log-format` | `LOG_FORMAT` | Log format (text or json) | text |
 | `-log-level` | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARN, ERROR, OFF)  | INFO |
 | `-max-body-size` | `MAX_BODY_SIZE` | Maximum size of request or response, in bytes | 1048576 |
+| `-max-concurrent-requests` | `MAX_CONCURRENT_REQUESTS` | Maximum number of concurrent requests (0 = unlimited) | 0 |
 | `-max-duration` | `MAX_DURATION` | Maximum duration a response may take | 10s |
 | `-port` | `PORT` | Port to listen on | 8080 |
 | `-prefix` | `PREFIX` | Prefix of path to listen on (must start with slash and does not end with slash) | |
+| `-rate-limit-burst` | `RATE_LIMIT_BURST` | Maximum burst size for per-IP rate limiting | 20 |
+| `-rate-limit-cleanup-interval` | `RATE_LIMIT_CLEANUP_INTERVAL` | Cleanup interval for expired rate limit entries | 30s |
+| `-rate-limit-entry-ttl` | `RATE_LIMIT_ENTRY_TTL` | TTL for idle rate limit entries | 5m |
+| `-rate-limit-max-ips` | `RATE_LIMIT_MAX_IPS` | Maximum number of tracked IPs for rate limiting | 100000 |
+| `-rate-limit-rate` | `RATE_LIMIT_RATE` | Requests per second per IP for rate limiting (0 = disabled) | 5 |
+| `-rate-limit-use-subnets` | `RATE_LIMIT_USE_SUBNETS` | Group rate limits by /24 (IPv4) or /64 (IPv6) subnet | false |
+| `-srv-idle-timeout` | `SRV_IDLE_TIMEOUT` | Value to use for the http.Server's IdleTimeout option | 120s |
 | `-srv-max-header-bytes` | `SRV_MAX_HEADER_BYTES` | Value to use for the http.Server's MaxHeaderBytes option | 16384 |
 | `-srv-read-header-timeout` | `SRV_READ_HEADER_TIMEOUT` | Value to use for the http.Server's ReadHeaderTimeout option | 1s |
 | `-srv-read-timeout` | `SRV_READ_TIMEOUT` | Value to use for the http.Server's ReadTimeout option | 5s |
+| `-srv-write-timeout` | `SRV_WRITE_TIMEOUT` | Value to use for the http.Server's WriteTimeout option | 30s |
+| `-trusted-proxies` | `TRUSTED_PROXIES` | Comma-separated list of trusted proxy CIDRs for X-Forwarded-For parsing (empty = trust all, "none" = trust none) | |
 | `-use-real-hostname` | `USE_REAL_HOSTNAME` | Expose real hostname as reported by os.Hostname() in the /hostname endpoint | false |
 
 > [!WARNING]
@@ -146,7 +152,7 @@ deployments:
     --user root \
     --cap-drop ALL \
     --cap-add CAP_NET_BIND_SERVICE \
-    ghcr.io/mccutchen/go-httpbin \
+    ghcr.io/galti3r/go-httpbin \
     /bin/go-httpbin -port=80
   ```
 
@@ -166,13 +172,13 @@ To add go-httpbin as a dependency to an existing golang project (e.g. for use
 in unit tests):
 
 ```
-go get -u github.com/mccutchen/go-httpbin/v2
+go get -u github.com/galti3r/go-httpbin/v2
 ```
 
 To install the `go-httpbin` binary:
 
 ```
-go install github.com/mccutchen/go-httpbin/v2/cmd/go-httpbin@latest
+go install github.com/galti3r/go-httpbin/v2/cmd/go-httpbin@latest
 ```
 
 
@@ -241,6 +247,21 @@ public internet, consider tuning it appropriately:
 
        EXCLUDE_HEADERS="x-fc-access-key-*,x-fc-security-token,x-fc-region"
 
+6. **Configure rate limiting for public deployments**
+
+   By default, go-httpbin applies a rate limit of 5 requests per second per IP
+   address. You can tune the rate limiting behavior using the `-rate-limit-*`
+   CLI arguments or the corresponding `RATE_LIMIT_*` env vars.
+
+   For environments behind a reverse proxy (e.g. Docker, Kubernetes), configure
+   trusted proxies to ensure rate limiting uses the real client IP:
+
+       TRUSTED_PROXIES="172.16.0.0/12,10.0.0.0/8"
+
+   Use the special value `none` to disable proxy header parsing entirely:
+
+       TRUSTED_PROXIES=none
+
 ## Development
 
 See [DEVELOPMENT.md][].
@@ -274,19 +295,25 @@ Compared to [ahmetb/go-httpbin][ahmet]:
  - No dependencies on 3rd party packages
  - More complete implementation of endpoints
 
+Additional endpoints not in the original httpbin:
+ - `/version`, `/pdf`, `/problem` (RFC 9457), `/echo`, `/close`, `/negotiate`, `/mix`
+ - Enhanced `/sse` with named events, `Last-Event-ID`, `retry`, and `fail_after` support
+ - Enhanced `/delay` with range syntax (e.g. `/delay/2-8`)
+ - Global `?response_delay=` query parameter on all endpoints
+ - Per-IP rate limiting and concurrent request limiting
+
 
 [ahmet]: https://github.com/ahmetb/go-httpbin
 [alibaba-headers]: https://www.alibabacloud.com/help/en/fc/user-guide/specification-details#section-3f8-5y1-i77
 [DEVELOPMENT.md]: ./DEVELOPMENT.md
-[docker-hub]: https://hub.docker.com/r/mccutchen/go-httpbin/
 [examples/custom-instrumentation]: ./examples/custom-instrumentation/
-[ghcr]: https://github.com/mccutchen/go-httpbin/pkgs/container/go-httpbin
+[ghcr]: https://github.com/galti3r/go-httpbin/pkgs/container/go-httpbin
 [httpbin-org]: https://httpbin.org/
 [httpbin-repo]: https://github.com/kennethreitz/httpbin
 [httpbingo.org]: https://httpbingo.org/
 [kr]: https://github.com/kennethreitz
 [mccutchen/httpbingo.org]: https://github.com/mccutchen/httpbingo.org
-[Observer]: https://pkg.go.dev/github.com/mccutchen/go-httpbin/v2/httpbin#Observer
+[Observer]: https://pkg.go.dev/github.com/galti3r/go-httpbin/v2/httpbin#Observer
 [Production considerations]: #production-considerations
 [SECURITY.md]: ./SECURITY.md
 [zerolog]: https://github.com/rs/zerolog

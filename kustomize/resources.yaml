@@ -7,7 +7,7 @@ spec:
     spec:
       containers:
         - name: httpbin
-          image: ghcr.io/mccutchen/go-httpbin
+          image: ghcr.io/galti3r/go-httpbin
           ports:
             - name: http
               containerPort: 8080
