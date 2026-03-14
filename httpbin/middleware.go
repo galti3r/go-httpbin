@@ -112,7 +112,7 @@ func (mw *metaResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return mw.w.(http.Hijacker).Hijack()
 }
 
-func observe(o Observer, h http.Handler) http.Handler {
+func observe(o Observer, clientIPFunc func(*http.Request) string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mw := &metaResponseWriter{w: w}
 		t := time.Now()
@@ -124,8 +124,41 @@ func observe(o Observer, h http.Handler) http.Handler {
 			Size:      mw.Size(),
 			Duration:  time.Since(t),
 			UserAgent: r.Header.Get("User-Agent"),
-			ClientIP:  getClientIP(r),
+			ClientIP:  clientIPFunc(r),
 		})
+	})
+}
+
+func maxConcurrent(n int, h http.Handler) http.Handler {
+	sem := make(chan struct{}, n)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+			h.ServeHTTP(w, r)
+		default:
+			writeError(w, http.StatusServiceUnavailable, nil)
+		}
+	})
+}
+
+func responseDelay(maxDuration time.Duration, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if v := r.URL.Query().Get("response_delay"); v != "" {
+			delay, err := parseBoundedDuration(v, 0, maxDuration)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			if delay > 0 {
+				select {
+				case <-time.After(delay):
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
+		h.ServeHTTP(w, r)
 	})
 }
 
