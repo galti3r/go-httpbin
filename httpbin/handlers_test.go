@@ -27,9 +27,9 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/mccutchen/go-httpbin/v2/internal/testing/assert"
-	"github.com/mccutchen/go-httpbin/v2/internal/testing/must"
-	"github.com/mccutchen/go-httpbin/v2/internal/testing/netpipetestserver"
+	"github.com/galti3r/go-httpbin/v2/internal/testing/assert"
+	"github.com/galti3r/go-httpbin/v2/internal/testing/must"
+	"github.com/galti3r/go-httpbin/v2/internal/testing/netpipetestserver"
 )
 
 // appTestInfo carries the setup necessary for each unit test below, forming
@@ -3380,6 +3380,14 @@ func TestSSE(t *testing.T) {
 	parseServerSentEvent := func(t *testing.T, buf *bufio.Reader) (serverSentEvent, error) {
 		t.Helper()
 
+		// match "id: N" line
+		idLine, err := buf.ReadBytes('\n')
+		if err != nil {
+			return serverSentEvent{}, err
+		}
+		_, idVal, _ := bytes.Cut(idLine, []byte(":"))
+		_ = bytes.TrimSpace(idVal) // id value
+
 		// match "event: ping" line
 		eventLine, err := buf.ReadBytes('\n')
 		if err != nil {
@@ -3545,7 +3553,7 @@ func TestSSE(t *testing.T) {
 				// We expect to read exactly one byte on each iteration. On the
 				// last iteration, we expct to hit EOF after reading the final
 				// byte, because the server does not pause after the last write.
-				assert.Equal(t, event.ID, i, "unexpected SSE event ID")
+				assert.Equal(t, event.ID, i+1, "unexpected SSE event ID")
 
 				// only ensure that we pause for the expected time between writes
 				// after the first byte.
@@ -3602,7 +3610,7 @@ func TestSSE(t *testing.T) {
 			// partial read should include the first whole event
 			event, err := parseServerSentEvent(t, bufio.NewReader(bytes.NewReader(body)))
 			assert.NilError(t, err)
-			assert.Equal(t, event.ID, 0, "unexpected SSE event ID")
+			assert.Equal(t, event.ID, 1, "unexpected SSE event ID")
 		})
 	})
 
@@ -3795,4 +3803,291 @@ func mustParseResponse[T any](t *testing.T, resp *http.Response) T {
 	assert.StatusCode(t, resp, http.StatusOK)
 	assert.ContentType(t, resp, jsonContentType)
 	return must.Unmarshal[T](t, resp.Body)
+}
+
+func TestVersion(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t, WithVersion("1.2.3"))
+	req := newTestRequest(t, "GET", app.URL("/version"), nil)
+	resp := mustDoRequest(t, app, req)
+	result := mustParseResponse[versionResponse](t, resp)
+	assert.Equal(t, result.Version, "1.2.3", "incorrect version")
+	assert.Contains(t, result.GoVersion, "go1.", "incorrect go version")
+}
+
+func TestPDF(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+	req := newTestRequest(t, "GET", app.URL("/pdf"), nil)
+	resp := mustDoRequest(t, app, req)
+	assert.StatusCode(t, resp, http.StatusOK)
+	assert.ContentType(t, resp, "application/pdf")
+	body := must.ReadAll(t, resp.Body)
+	assert.Contains(t, body, "%PDF-", "expected PDF magic bytes")
+}
+
+func TestProblemDetails(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	t.Run("default", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/problem"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, problemContentType)
+		result := must.Unmarshal[problemDetailResponse](t, resp.Body)
+		assert.Equal(t, result.Type, "about:blank", "wrong default type")
+		assert.Equal(t, result.Title, "OK", "wrong default title")
+		assert.Equal(t, result.Status, 200, "wrong default status")
+	})
+
+	t.Run("custom_status", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/problem", url.Values{"status": {"422"}}), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.Equal(t, resp.StatusCode, 422, "wrong status code")
+		assert.ContentType(t, resp, problemContentType)
+	})
+
+	t.Run("invalid_status", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/problem", url.Values{"status": {"999"}}), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+}
+
+func TestEcho(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	t.Run("json_body", func(t *testing.T) {
+		t.Parallel()
+		body := `{"key":"value"}`
+		req := newTestRequest(t, "POST", app.URL("/echo"), strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "application/json")
+		got := must.ReadAll(t, resp.Body)
+		assert.Equal(t, got, body, "body mismatch")
+	})
+
+	t.Run("text_body", func(t *testing.T) {
+		t.Parallel()
+		body := "hello world"
+		req := newTestRequest(t, "POST", app.URL("/echo"), strings.NewReader(body))
+		req.Header.Set("Content-Type", "text/plain")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		got := must.ReadAll(t, resp.Body)
+		assert.Equal(t, got, body, "body mismatch")
+	})
+
+	t.Run("dangerous_content_type_escaped", func(t *testing.T) {
+		t.Parallel()
+		body := "<script>alert(1)</script>"
+		req := newTestRequest(t, "POST", app.URL("/echo"), strings.NewReader(body))
+		req.Header.Set("Content-Type", "text/html")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		// Should be escaped to text/plain
+		assert.ContentType(t, resp, textContentType)
+	})
+
+	t.Run("get_not_allowed", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/echo"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusMethodNotAllowed)
+	})
+}
+
+func TestNegotiate(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	t.Run("default_json", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/negotiate"), nil)
+		resp := mustDoRequest(t, app, req)
+		result := mustParseResponse[map[string]string](t, resp)
+		assert.Equal(t, result["content_type"], jsonContentType, "wrong content type")
+	})
+
+	t.Run("wildcard", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/negotiate"), nil)
+		req.Header.Set("Accept", "*/*")
+		resp := mustDoRequest(t, app, req)
+		result := mustParseResponse[map[string]string](t, resp)
+		assert.Equal(t, result["content_type"], jsonContentType, "wrong content type")
+	})
+
+	t.Run("no_match_406", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/negotiate"), nil)
+		req.Header.Set("Accept", "image/tiff")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusNotAcceptable)
+	})
+
+	t.Run("vary_header", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/negotiate"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.Header(t, resp, "Vary", "Accept")
+	})
+}
+
+func TestStatus429(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+	req := newTestRequest(t, "GET", app.URL("/status/429"), nil)
+	resp := mustDoRequest(t, app, req)
+	assert.StatusCode(t, resp, 429)
+	assert.Header(t, resp, "Retry-After", "5")
+}
+
+func TestResponseDelay(t *testing.T) {
+	t.Parallel()
+
+	t.Run("invalid", func(t *testing.T) {
+		t.Parallel()
+		app := setupTestApp(t)
+		req := newTestRequest(t, "GET", app.URL("/get", url.Values{"response_delay": {"abc"}}), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	t.Run("exceeds_max", func(t *testing.T) {
+		t.Parallel()
+		app := setupTestApp(t)
+		req := newTestRequest(t, "GET", app.URL("/get", url.Values{"response_delay": {"999s"}}), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	t.Run("zero_delay", func(t *testing.T) {
+		t.Parallel()
+		app := setupTestApp(t)
+		req := newTestRequest(t, "GET", app.URL("/get", url.Values{"response_delay": {"0"}}), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+
+	t.Run("no_param", func(t *testing.T) {
+		t.Parallel()
+		app := setupTestApp(t)
+		req := newTestRequest(t, "GET", app.URL("/get"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+}
+
+func TestDelayRange(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reversed_range", func(t *testing.T) {
+		t.Parallel()
+		app := setupTestApp(t)
+		req := newTestRequest(t, "GET", app.URL("/delay/3-1"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+}
+
+func TestMix(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	t.Run("status_only", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/mix/s=503"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.Equal(t, resp.StatusCode, 503, "wrong status code")
+	})
+
+	t.Run("header", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/mix/s=200/h=X-Custom:test-value"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 200)
+		assert.Header(t, resp, "X-Custom", "test-value")
+	})
+
+	t.Run("body_base64", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/mix/b64=SGVsbG8="), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 200)
+		body := must.ReadAll(t, resp.Body)
+		assert.Equal(t, body, "Hello", "wrong body")
+	})
+
+	t.Run("invalid_directive", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/mix/x=foo"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	t.Run("forbidden_header", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/mix/h=Location:evil"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	t.Run("too_many_directives", func(t *testing.T) {
+		t.Parallel()
+		path := "/mix/" + strings.Repeat("s=200/", 21)
+		req := newTestRequest(t, "GET", app.URL(path), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+}
+
+func TestImageSize(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	t.Run("png_small", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/png", url.Values{"size": {"small"}}), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/png")
+	})
+
+	t.Run("jpeg_medium", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/jpeg", url.Values{"size": {"medium"}}), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/jpeg")
+	})
+
+	t.Run("invalid_size", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/png", url.Values{"size": {"huge"}}), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	t.Run("unsupported_format_with_size", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/svg", url.Values{"size": {"small"}}), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	t.Run("no_size_backward_compat", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/png"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/png")
+	})
 }

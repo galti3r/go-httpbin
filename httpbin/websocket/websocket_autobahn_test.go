@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mccutchen/go-httpbin/v2/httpbin/websocket"
-	"github.com/mccutchen/go-httpbin/v2/internal/testing/assert"
+	"github.com/galti3r/go-httpbin/v2/httpbin/websocket"
+	"github.com/galti3r/go-httpbin/v2/internal/testing/assert"
 )
 
 const autobahnImage = "crossbario/autobahn-testsuite:25.10.1"
