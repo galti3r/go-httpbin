@@ -1,7 +1,7 @@
 # The version that will be used in docker tags (e.g. to push a
 # go-httpbin:latest image use `make imagepush VERSION=latest)`
 VERSION    ?= $(shell git rev-parse --short HEAD)
-DOCKER_TAG ?= mccutchen/go-httpbin:$(VERSION)
+DOCKER_TAG ?= ghcr.io/galti3r/go-httpbin:$(VERSION)
 
 # Built binaries will be placed here
 DIST_PATH  	  ?= dist
@@ -99,3 +99,31 @@ imagepush:
 	docker buildx build --push --platform linux/amd64,linux/arm64 -t $(DOCKER_TAG) .
 	docker buildx rm httpbin
 .PHONY: imagepush
+
+
+# =============================================================================
+# e2e tests
+# =============================================================================
+teste2e: image
+	@echo "Running E2E tests..."
+	@bash e2e/e2e_test.sh
+.PHONY: teste2e
+
+testall: test lint teste2e
+.PHONY: testall
+
+# =============================================================================
+# podman support
+# =============================================================================
+imagepodman:
+	podman build -t go-httpbin:test .
+.PHONY: imagepodman
+
+
+# =============================================================================
+# setup
+# =============================================================================
+setup-hooks:
+	git config core.hooksPath .githooks
+	@echo "Git hooks configured (.githooks/)"
+.PHONY: setup-hooks
