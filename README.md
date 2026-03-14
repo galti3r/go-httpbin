@@ -246,20 +246,88 @@ public internet, consider tuning it appropriately:
 
        EXCLUDE_HEADERS="x-fc-access-key-*,x-fc-security-token,x-fc-region"
 
-6. **Configure rate limiting for public deployments**
+6. **Configure DoS protection for public deployments**
 
-   By default, go-httpbin applies a rate limit of 5 requests per second per IP
-   address. You can tune the rate limiting behavior using the `-rate-limit-*`
-   CLI arguments or the corresponding `RATE_LIMIT_*` env vars.
+   go-httpbin includes multiple layers of protection against denial-of-service
+   attacks, all configurable via CLI arguments or environment variables:
 
-   For environments behind a reverse proxy (e.g. Docker, Kubernetes), configure
-   trusted proxies to ensure rate limiting uses the real client IP:
+   **Per-IP rate limiting** (token bucket algorithm):
 
-       TRUSTED_PROXIES="172.16.0.0/12,10.0.0.0/8"
+   By default, each client IP is limited to 5 requests per second with a burst
+   of 20. Clients exceeding the limit receive `429 Too Many Requests` with a
+   `Retry-After` header.
 
-   Use the special value `none` to disable proxy header parsing entirely:
+   ```bash
+   # Tune rate limiting
+   RATE_LIMIT_RATE=10          # 10 requests/second sustained rate
+   RATE_LIMIT_BURST=50         # allow bursts up to 50 requests
+   RATE_LIMIT_MAX_IPS=100000   # max tracked IPs (~10MB memory)
+   RATE_LIMIT_ENTRY_TTL=5m     # forget idle IPs after 5 minutes
+   RATE_LIMIT_USE_SUBNETS=true # group by /24 (IPv4) or /64 (IPv6) subnet
 
-       TRUSTED_PROXIES=none
+   # Disable rate limiting entirely
+   RATE_LIMIT_RATE=0
+   ```
+
+   **Concurrent request limiting**:
+
+   Limit the number of simultaneous in-flight requests. When the limit is
+   reached, new requests receive `503 Service Unavailable`.
+
+   ```bash
+   MAX_CONCURRENT_REQUESTS=100  # 0 = unlimited (default)
+   ```
+
+   **Server timeouts**:
+
+   ```bash
+   SRV_WRITE_TIMEOUT=30s        # max time to write a response (default: 30s)
+   SRV_IDLE_TIMEOUT=120s        # max idle keep-alive duration (default: 120s)
+   SRV_READ_TIMEOUT=5s          # max time to read a request (default: 5s)
+   SRV_READ_HEADER_TIMEOUT=1s   # max time to read request headers (default: 1s)
+   ```
+
+   **Trusted proxies** (for correct client IP detection behind reverse proxies):
+
+   When go-httpbin runs behind a reverse proxy (nginx, Traefik, cloud load
+   balancer), the client IP seen by go-httpbin is the proxy's IP, not the real
+   client. Configure trusted proxy CIDRs so that `X-Forwarded-For` headers
+   from those proxies are parsed correctly (right-to-left, finding the first
+   non-trusted IP):
+
+   ```bash
+   # Trust Docker/Kubernetes internal networks
+   TRUSTED_PROXIES="172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
+
+   # Trust no proxy headers (always use RemoteAddr)
+   TRUSTED_PROXIES=none
+
+   # Default (empty): trust all proxy headers (backward compatible)
+   ```
+
+   This affects the `/ip` endpoint, request logging, and rate limiting (which
+   uses the detected client IP as the rate limit key).
+
+7. **Response delay middleware**
+
+   All endpoints accept an optional `?response_delay=` query parameter that
+   adds an initial delay before the server responds. This is useful for
+   simulating slow APIs, testing client timeouts, and testing download behavior
+   with delayed responses.
+
+   ```bash
+   # Delay 2 seconds before serving a PNG image
+   curl http://localhost:8080/image/png?response_delay=2s
+
+   # Random delay between 1 and 5 seconds
+   curl http://localhost:8080/get?response_delay=1-5
+
+   # Combine with image sizes for realistic slow download testing
+   curl http://localhost:8080/image/jpeg?size=large&response_delay=3s
+   ```
+
+   The delay is bounded by `-max-duration`/`MAX_DURATION` (default 10s).
+   Invalid or excessive values return `400 Bad Request`.
 
 ## Development
 
