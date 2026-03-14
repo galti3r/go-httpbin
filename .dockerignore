@@ -1,3 +1,55 @@
-.*
-dist
-examples
+# Environment & secrets
+.env
+.env.*
+
+# Version control
+.git/
+.github/
+
+# Build output
+dist/
+
+# Examples & docs
+examples/
+
+# Test artifacts
+coverage.txt
+*.test
+*.prof
+.integrationtests/
+
+# Planning docs
+PLAN-*.md
+PROGRESS-*.md
+docs/AUDIT-*.md
+
+# AI tools
+CLAUDE.md
+.claude/
+.cursorrules
+.cursor/
+.windsurfrules
+.windsurf/
+CODEX.md
+AGENTS.md
+AGENT.md
+
+# E2E tests
+e2e/
+
+# Docker Compose
+docker-compose.yml
+
+# Editor
+.vscode/
+.idea/
+.editorconfig
+*.swp
+*~
+
+# Git hooks
+.githooks/
+
+# OS
+.DS_Store
+Thumbs.db
