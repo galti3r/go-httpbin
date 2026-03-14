@@ -8,9 +8,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---------------------------------------------------------------------------
-# Detect container runtime (prefer podman)
+# Detect container runtime (CONTAINER_RUNTIME env overrides auto-detection)
 # ---------------------------------------------------------------------------
-if command -v podman >/dev/null 2>&1; then
+if [ -n "${CONTAINER_RUNTIME:-}" ]; then
+    RUNTIME="$CONTAINER_RUNTIME"
+elif command -v podman >/dev/null 2>&1; then
     RUNTIME="podman"
 elif command -v docker >/dev/null 2>&1; then
     RUNTIME="docker"
