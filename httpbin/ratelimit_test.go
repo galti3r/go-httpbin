@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/galti3r/go-httpbin/v2/internal/testing/assert"
+	"github.com/galti3r/go-httpbin/v3/internal/testing/assert"
 )
 
 func TestTokenBucket(t *testing.T) {

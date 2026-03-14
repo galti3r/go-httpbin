@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/galti3r/go-httpbin/v2/internal/testing/must"
+	"github.com/galti3r/go-httpbin/v3/internal/testing/must"
 )
 
 // Equal asserts that two values are equal.

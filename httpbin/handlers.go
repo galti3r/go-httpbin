@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/galti3r/go-httpbin/v2/httpbin/digest"
-	"github.com/galti3r/go-httpbin/v2/httpbin/websocket"
+	"github.com/galti3r/go-httpbin/v3/httpbin/digest"
+	"github.com/galti3r/go-httpbin/v3/httpbin/websocket"
 )
 
 var nilValues = url.Values{}

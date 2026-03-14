@@ -14,9 +14,9 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/galti3r/go-httpbin/v2/httpbin/websocket"
-	"github.com/galti3r/go-httpbin/v2/internal/testing/assert"
-	"github.com/galti3r/go-httpbin/v2/internal/testing/netpipetestserver"
+	"github.com/galti3r/go-httpbin/v3/httpbin/websocket"
+	"github.com/galti3r/go-httpbin/v3/internal/testing/assert"
+	"github.com/galti3r/go-httpbin/v3/internal/testing/netpipetestserver"
 )
 
 func TestHandshake(t *testing.T) {
