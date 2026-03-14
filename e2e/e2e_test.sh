@@ -39,10 +39,10 @@ cleanup() {
     echo "Cleaning up..."
     "$RUNTIME" rm -f "$NGINX_CTR"  >/dev/null 2>&1 || true
     "$RUNTIME" rm -f "$HTTPBIN_CTR" >/dev/null 2>&1 || true
+    "$RUNTIME" rm -f "e2e-ratelimit-$$" >/dev/null 2>&1 || true
     if [ "$RUNTIME" = "podman" ]; then
         podman pod rm -f "$POD_NAME" >/dev/null 2>&1 || true
     else
-        docker rm -f "$NGINX_CTR" "$HTTPBIN_CTR" >/dev/null 2>&1 || true
         docker network rm "e2e-net-$$" >/dev/null 2>&1 || true
     fi
 }
