@@ -57,7 +57,7 @@ jobs:
         run: docker build -t go-httpbin:e2e-test .
 
       - name: Run E2E tests
-        run: DOCKER_TAG=go-httpbin:e2e-test bash e2e/e2e_test.sh
+        run: CONTAINER_RUNTIME=docker DOCKER_TAG=go-httpbin:e2e-test bash e2e/e2e_test.sh
 
   security:
     runs-on: ubuntu-latest
@@ -70,7 +70,7 @@ jobs:
         run: docker build -t go-httpbin:security-scan .
 
       - name: Scan image with Grype
-        uses: anchore/scan-action@2c901ab7e0d3c7f4ef3eeac3aa6eef5f1a5ec011 # v7.0.0
+        uses: anchore/scan-action@7037fa011853d5a11690026fb85feee79f4c946c # v7.3.2
         with:
           image: go-httpbin:security-scan
           fail-build: true
