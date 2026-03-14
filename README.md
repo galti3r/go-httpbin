@@ -4,6 +4,7 @@ A reasonably complete and well-tested golang port of [Kenneth Reitz][kr]'s
 [httpbin][httpbin-org] service, with zero dependencies outside the go stdlib.
 
 [![Build status](https://github.com/galti3r/go-httpbin/actions/workflows/ci.yaml/badge.svg)](https://github.com/galti3r/go-httpbin/actions/workflows/ci.yaml)
+[![GHCR](https://img.shields.io/badge/ghcr.io-galti3r%2Fgo--httpbin-blue?logo=github)](https://github.com/galti3r/go-httpbin/pkgs/container/go-httpbin)
 
 
 ## Usage
