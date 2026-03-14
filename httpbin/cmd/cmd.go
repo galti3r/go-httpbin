@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/galti3r/go-httpbin/v2/httpbin"
+	"github.com/galti3r/go-httpbin/v3/httpbin"
 )
 
 const (

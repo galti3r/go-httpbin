@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"github.com/galti3r/go-httpbin/v2/httpbin/cmd"
+	"github.com/galti3r/go-httpbin/v3/httpbin/cmd"
 )
 
 func main() {

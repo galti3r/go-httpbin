@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/DataDog/datadog-go v4.8.3+incompatible
-	github.com/galti3r/go-httpbin/v2 v2.20.0
+	github.com/galti3r/go-httpbin/v3 v3.0.0
 )
 
 require (
@@ -17,4 +17,4 @@ require (
 
 // Always build against the local version, to make it easier to update examples
 // in sync with changes to go-httpbin
-replace github.com/galti3r/go-httpbin/v2 => ../..
+replace github.com/galti3r/go-httpbin/v3 => ../..

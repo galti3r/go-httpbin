@@ -40,18 +40,18 @@ Examples:
 
 ```bash
 # Run http server
-$ go run github.com/galti3r/go-httpbin/v2/cmd/go-httpbin@latest -host 127.0.0.1 -port 8081
+$ go run github.com/galti3r/go-httpbin/v3/cmd/go-httpbin@latest -host 127.0.0.1 -port 8081
 
 # Run https server
 $ openssl genrsa -out server.key 2048
 $ openssl ecparam -genkey -name secp384r1 -out server.key
 $ openssl req -new -x509 -sha256 -key server.key -out server.crt -days 3650
-$ go run github.com/galti3r/go-httpbin/v2/cmd/go-httpbin@latest -host 127.0.0.1 -port 8081 -https-cert-file ./server.crt -https-key-file ./server.key
+$ go run github.com/galti3r/go-httpbin/v3/cmd/go-httpbin@latest -host 127.0.0.1 -port 8081 -https-cert-file ./server.crt -https-key-file ./server.key
 ```
 
 ### Unit testing helper library
 
-The `github.com/galti3r/go-httpbin/v2/httpbin` package can also be used as a
+The `github.com/galti3r/go-httpbin/v3/httpbin` package can also be used as a
 library for testing an application's interactions with an upstream HTTP
 service, like so:
 
@@ -65,7 +65,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/galti3r/go-httpbin/v2/httpbin"
+	"github.com/galti3r/go-httpbin/v3/httpbin"
 )
 
 func TestSlowResponse(t *testing.T) {
@@ -172,13 +172,13 @@ To add go-httpbin as a dependency to an existing golang project (e.g. for use
 in unit tests):
 
 ```
-go get -u github.com/galti3r/go-httpbin/v2
+go get -u github.com/galti3r/go-httpbin/v3
 ```
 
 To install the `go-httpbin` binary:
 
 ```
-go install github.com/galti3r/go-httpbin/v2/cmd/go-httpbin@latest
+go install github.com/galti3r/go-httpbin/v3/cmd/go-httpbin@latest
 ```
 
 
@@ -381,7 +381,7 @@ Additional endpoints not in the original httpbin:
 [httpbingo.org]: https://httpbingo.org/
 [kr]: https://github.com/kennethreitz
 [mccutchen/httpbingo.org]: https://github.com/mccutchen/httpbingo.org
-[Observer]: https://pkg.go.dev/github.com/galti3r/go-httpbin/v2/httpbin#Observer
+[Observer]: https://pkg.go.dev/github.com/galti3r/go-httpbin/v3/httpbin#Observer
 [Production considerations]: #production-considerations
 [SECURITY.md]: ./SECURITY.md
 [zerolog]: https://github.com/rs/zerolog

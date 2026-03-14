@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/galti3r/go-httpbin/v2/internal/testing/assert"
+	"github.com/galti3r/go-httpbin/v3/internal/testing/assert"
 )
 
 func TestTestMode(t *testing.T) {

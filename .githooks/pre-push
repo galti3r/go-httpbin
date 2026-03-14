@@ -1,0 +1,34 @@
+#!/bin/bash
+# Pre-push hook: block AI references in commit metadata.
+# Install: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+RED='\033[0;31m'
+NC='\033[0m'
+
+REMOTE="$1"
+
+# ---------------------------------------------------------------
+# 1. Block AI assistant references in commits
+# ---------------------------------------------------------------
+while read -r LOCAL_SHA _ REMOTE_SHA _; do
+    if [ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ]; then
+        continue # deleting branch
+    fi
+
+    if [ "$REMOTE_SHA" = "0000000000000000000000000000000000000000" ]; then
+        RANGE="$LOCAL_SHA"
+    else
+        RANGE="$REMOTE_SHA..$LOCAL_SHA"
+    fi
+
+    # Check commit messages, author, committer, and trailers
+    if git log --format="%B %an %ae %cn %ce" "$RANGE" 2>/dev/null | grep -qi -E "claude|anthropic"; then
+        echo -e "${RED}BLOCKED:${NC} found 'claude' or 'anthropic' reference in commit metadata."
+        echo "Check: git log --format='%B %an %ae %cn %ce' $RANGE"
+        exit 1
+    fi
+done
+
+exit 0
