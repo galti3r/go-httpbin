@@ -8,7 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"io"
+	"math"
 	"math/rand"
 	"mime"
 	"mime/multipart"
@@ -16,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,37 +46,102 @@ func getRequestHeaders(r *http.Request, fn headersProcessorFunc) http.Header {
 	return h
 }
 
-// getClientIP tries to get a reasonable value for the IP address of the
-// client making the request. Note that this value will likely be trivial to
-// spoof, so do not rely on it for security purposes.
-func getClientIP(r *http.Request) string {
-	// Special case some hosting platforms that provide the value directly.
-	if clientIP := r.Header.Get("Fly-Client-IP"); clientIP != "" {
-		return clientIP
-	}
-	if clientIP := r.Header.Get("CF-Connecting-IP"); clientIP != "" {
-		return clientIP
-	}
-	if clientIP := r.Header.Get("Fastly-Client-IP"); clientIP != "" {
-		return clientIP
-	}
-	if clientIP := r.Header.Get("True-Client-IP"); clientIP != "" {
-		return clientIP
-	}
-
-	// Try to pull a reasonable value from the X-Forwarded-For header, if
-	// present, by taking the first entry in a comma-separated list of IPs.
-	if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
-		return strings.TrimSpace(strings.SplitN(forwardedFor, ",", 2)[0])
-	}
-
-	// Finally, fall back on the actual remote addr from the request.
-	remoteAddr := r.RemoteAddr
+// extractRemoteIP extracts the IP address from r.RemoteAddr, stripping the
+// port if present.
+func extractRemoteIP(remoteAddr string) string {
 	if strings.IndexByte(remoteAddr, ':') > 0 {
 		ip, _, _ := net.SplitHostPort(remoteAddr)
 		return ip
 	}
 	return remoteAddr
+}
+
+// getClientIP tries to get a reasonable value for the IP address of the
+// client making the request. Note that this value will likely be trivial to
+// spoof, so do not rely on it for security purposes.
+//
+// When trustedProxies is nil and trustedProxiesConfigured is false, all proxy
+// headers are trusted (backward compatible default). When trustedProxies is
+// an empty slice, no proxy headers are trusted. Otherwise, only requests from
+// trusted proxy CIDRs have their X-Forwarded-For headers parsed.
+func getClientIP(r *http.Request, trustedProxies []*net.IPNet, trustedProxiesConfigured bool) string {
+	remoteIP := extractRemoteIP(r.RemoteAddr)
+
+	// If trusted proxies are not configured at all, use the legacy behavior:
+	// trust all proxy headers unconditionally (backward compatible).
+	if !trustedProxiesConfigured {
+		// Special case some hosting platforms that provide the value directly.
+		if clientIP := r.Header.Get("Fly-Client-IP"); clientIP != "" {
+			return clientIP
+		}
+		if clientIP := r.Header.Get("CF-Connecting-IP"); clientIP != "" {
+			return clientIP
+		}
+		if clientIP := r.Header.Get("Fastly-Client-IP"); clientIP != "" {
+			return clientIP
+		}
+		if clientIP := r.Header.Get("True-Client-IP"); clientIP != "" {
+			return clientIP
+		}
+
+		// Try X-Forwarded-For, taking the first entry.
+		if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
+			return strings.TrimSpace(strings.SplitN(forwardedFor, ",", 2)[0])
+		}
+
+		return remoteIP
+	}
+
+	// If trusted proxies is an empty slice, trust no headers.
+	if len(trustedProxies) == 0 {
+		return remoteIP
+	}
+
+	// Check if RemoteAddr is from a trusted proxy
+	ip := net.ParseIP(remoteIP)
+	if ip == nil {
+		return remoteIP
+	}
+
+	isTrusted := false
+	for _, cidr := range trustedProxies {
+		if cidr.Contains(ip) {
+			isTrusted = true
+			break
+		}
+	}
+	if !isTrusted {
+		return remoteIP
+	}
+
+	// Walk X-Forwarded-For right-to-left, finding the first IP that is NOT
+	// a trusted proxy. This is the real client IP.
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return remoteIP
+	}
+
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(parts[i])
+		candidateIP := net.ParseIP(candidate)
+		if candidateIP == nil {
+			continue
+		}
+		trusted := false
+		for _, cidr := range trustedProxies {
+			if cidr.Contains(candidateIP) {
+				trusted = true
+				break
+			}
+		}
+		if !trusted {
+			return candidate
+		}
+	}
+
+	// All IPs in the chain are trusted; use the leftmost
+	return strings.TrimSpace(parts[0])
 }
 
 func getURL(r *http.Request) *url.URL {
@@ -630,4 +701,129 @@ func isDangerousContentType(ct string) bool {
 		return true
 	}
 	return !safeContentTypes[mediatype]
+}
+
+type acceptEntry struct {
+	mediaType string
+	quality   float64
+}
+
+func parseAcceptHeader(accept string) []acceptEntry {
+	if accept == "" {
+		return nil
+	}
+	var entries []acceptEntry
+	for _, part := range strings.Split(accept, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		entry := acceptEntry{quality: 1.0}
+		mediaType, params, _ := strings.Cut(part, ";")
+		entry.mediaType = strings.TrimSpace(mediaType)
+		if params != "" {
+			for _, param := range strings.Split(params, ";") {
+				param = strings.TrimSpace(param)
+				if strings.HasPrefix(param, "q=") {
+					if q, err := strconv.ParseFloat(strings.TrimPrefix(param, "q="), 64); err == nil {
+						entry.quality = q
+					}
+				}
+			}
+		}
+		entries = append(entries, entry)
+	}
+	// Sort by quality descending
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].quality > entries[j].quality
+	})
+	return entries
+}
+
+// generateImage creates a PNG or JPEG image of approximately the target size.
+// It generates a gradient pattern with noise to reach the target byte count.
+func generateImage(format string, targetSize int) ([]byte, string, error) {
+	// Estimate dimensions needed to reach target size
+	// For PNG with noise: roughly 1 byte per pixel after compression
+	// For JPEG: roughly 0.5 bytes per pixel at quality 85
+	var pixelCount int
+	switch format {
+	case "png":
+		pixelCount = targetSize // ~1 byte/pixel for noisy PNG
+	case "jpeg":
+		pixelCount = targetSize * 2 // JPEG compresses better
+	default:
+		return nil, "", fmt.Errorf("unsupported format for generation: %s", format)
+	}
+
+	// Calculate square dimensions
+	side := int(math.Sqrt(float64(pixelCount)))
+	if side < 1 {
+		side = 1
+	}
+	if side > 4096 {
+		side = 4096
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, side, side))
+	rng := rand.New(rand.NewSource(42)) // deterministic for cacheability
+
+	for y := 0; y < side; y++ {
+		for x := 0; x < side; x++ {
+			r := uint8((x * 255 / side) ^ rng.Intn(64))
+			g := uint8((y * 255 / side) ^ rng.Intn(64))
+			b := uint8(((x + y) * 127 / side) ^ rng.Intn(64))
+			img.SetRGBA(x, y, color.RGBA{R: r, G: g, B: b, A: 255})
+		}
+	}
+
+	var buf bytes.Buffer
+	var contentType string
+	switch format {
+	case "png":
+		contentType = "image/png"
+		if err := png.Encode(&buf, img); err != nil {
+			return nil, "", err
+		}
+	case "jpeg":
+		contentType = "image/jpeg"
+		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
+			return nil, "", err
+		}
+	}
+
+	return buf.Bytes(), contentType, nil
+}
+
+// parseDelayRange parses a delay value that may be a range like "2-8" or
+// "500ms-2s". Returns min and max durations. If not a range, returns the
+// same value for both.
+func parseDelayRange(input string, maxVal time.Duration) (time.Duration, time.Duration, error) {
+	// Try to find a range separator. We need to be careful because negative
+	// durations are not supported and "500ms-2s" has a dash in a valid position.
+	// Strategy: try splitting on "-" and check if both parts parse.
+	parts := strings.SplitN(input, "-", 2)
+	if len(parts) == 2 && parts[0] != "" {
+		minD, errMin := parseDuration(parts[0])
+		maxD, errMax := parseDuration(parts[1])
+		if errMin == nil && errMax == nil {
+			if minD > maxD {
+				return 0, 0, fmt.Errorf("delay range min %s must be <= max %s", minD, maxD)
+			}
+			if minD < 0 {
+				return 0, 0, fmt.Errorf("delay range min %s must be >= 0", minD)
+			}
+			if maxD > maxVal {
+				return 0, 0, fmt.Errorf("delay range max %s longer than %s", maxD, maxVal)
+			}
+			return minD, maxD, nil
+		}
+	}
+
+	// Not a range, parse as single duration
+	d, err := parseBoundedDuration(input, 0, maxVal)
+	if err != nil {
+		return 0, 0, err
+	}
+	return d, d, nil
 }

@@ -2,6 +2,7 @@ package httpbin
 
 import (
 	"bytes"
+	"net"
 	"net/http"
 	"time"
 )
@@ -96,6 +97,21 @@ type HTTPBin struct {
 	// Max number of SSE events to send, based on rough estimate of single
 	// event's size
 	maxSSECount int64
+
+	// Trusted proxy CIDRs for X-Forwarded-For header parsing.
+	// nil = trust all proxy headers (backward compatible default).
+	// empty = trust no proxy headers, use RemoteAddr only.
+	trustedProxies []*net.IPNet
+
+	// Whether trusted proxies have been explicitly configured
+	trustedProxiesConfigured bool
+
+	// Version string for the /version endpoint
+	version string
+
+	rateLimiter           *ipRateLimiter
+	rateLimitUseSubnets   bool
+	maxConcurrentRequests int
 }
 
 // New creates a new HTTPBin instance
@@ -119,7 +135,7 @@ func New(opts ...OptionFunc) *HTTPBin {
 	// compute max Server-Sent Event count based on max request size and rough
 	// estimate of a single event's size on the wire
 	var buf bytes.Buffer
-	writeServerSentEvent(&buf, 999, time.Now())
+	writeServerSentEvent(&buf, 999, time.Now(), "")
 	h.maxSSECount = h.MaxBodySize / int64(buf.Len())
 
 	h.handler = h.Handler()
@@ -129,6 +145,12 @@ func New(opts ...OptionFunc) *HTTPBin {
 // ServeHTTP implememnts the http.Handler interface.
 func (h *HTTPBin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.handler.ServeHTTP(w, r)
+}
+
+// getClientIP returns the client IP for the given request, using the
+// configured trusted proxy settings.
+func (h *HTTPBin) getClientIP(r *http.Request) string {
+	return getClientIP(r, h.trustedProxies, h.trustedProxiesConfigured)
 }
 
 // Assert that HTTPBin implements http.Handler interface
@@ -203,6 +225,18 @@ func (h *HTTPBin) Handler() http.Handler {
 	mux.HandleFunc("/uuid", h.UUID)
 	mux.HandleFunc("/xml", h.XML)
 
+	// New endpoints
+	mux.HandleFunc("/close", h.Close)
+	mux.HandleFunc("/negotiate", h.Negotiate)
+	mux.HandleFunc("/pdf", h.PDF)
+	mux.HandleFunc("/problem", h.ProblemDetails)
+	mux.HandleFunc("/version", h.Version)
+	mux.HandleFunc("POST /echo", h.Echo)
+	mux.HandleFunc("PUT /echo", h.Echo)
+	mux.HandleFunc("PATCH /echo", h.Echo)
+
+	mux.HandleFunc("/mix/", h.Mix)
+
 	// existing httpbin endpoints that we do not support
 	mux.HandleFunc("/brotli", notImplementedHandler)
 
@@ -210,15 +244,23 @@ func (h *HTTPBin) Handler() http.Handler {
 	var handler http.Handler
 	handler = mux
 	handler = limitRequestSize(h.MaxBodySize, handler)
+	handler = responseDelay(h.MaxDuration, handler)
 	handler = preflight(handler)
 	handler = autohead(handler)
+
+	if h.maxConcurrentRequests > 0 {
+		handler = maxConcurrent(h.maxConcurrentRequests, handler)
+	}
+	if h.rateLimiter != nil {
+		handler = rateLimitMiddleware(h.rateLimiter, h.getClientIP, h.rateLimitUseSubnets, handler)
+	}
 
 	if h.prefix != "" {
 		handler = http.StripPrefix(h.prefix, handler)
 	}
 
 	if h.Observer != nil {
-		handler = observe(h.Observer, handler)
+		handler = observe(h.Observer, h.getClientIP, handler)
 	}
 
 	return handler
