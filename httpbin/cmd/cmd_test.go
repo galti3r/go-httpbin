@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mccutchen/go-httpbin/v2/httpbin"
-	"github.com/mccutchen/go-httpbin/v2/internal/testing/assert"
+	"github.com/galti3r/go-httpbin/v2/httpbin"
+	"github.com/galti3r/go-httpbin/v2/internal/testing/assert"
 )
 
 // To update, run:
@@ -37,18 +37,38 @@ const usage = `Usage of go-httpbin:
     	Logging level (DEBUG, INFO, WARN, ERROR, OFF) (default "INFO")
   -max-body-size int
     	Maximum size of request or response, in bytes (default 1048576)
+  -max-concurrent-requests int
+    	Maximum number of concurrent requests (0 for unlimited)
   -max-duration duration
     	Maximum duration a response may take (default 10s)
   -port int
     	Port to listen on (default 8080)
   -prefix string
     	Path prefix (empty or start with slash and does not end with slash)
+  -rate-limit-burst int
+    	Rate limit max burst size (default 20)
+  -rate-limit-cleanup-interval duration
+    	Rate limit background cleanup interval (default 30s)
+  -rate-limit-entry-ttl duration
+    	Rate limit TTL for idle entries (default 5m0s)
+  -rate-limit-max-ips int
+    	Rate limit max tracked IP entries (default 100000)
+  -rate-limit-rate float
+    	Rate limit requests per second per IP (0 to disable) (default 5)
+  -rate-limit-use-subnets
+    	Rate limit by /24 (IPv4) or /64 (IPv6) subnets
+  -srv-idle-timeout duration
+    	Value to use for the http.Server's IdleTimeout option (default 2m0s)
   -srv-max-header-bytes int
     	Value to use for the http.Server's MaxHeaderBytes option (default 16384)
   -srv-read-header-timeout duration
     	Value to use for the http.Server's ReadHeaderTimeout option (default 1s)
   -srv-read-timeout duration
     	Value to use for the http.Server's ReadTimeout option (default 5s)
+  -srv-write-timeout duration
+    	Value to use for the http.Server's WriteTimeout option (default 30s)
+  -trusted-proxies string
+    	Comma-separated list of trusted proxy CIDRs for X-Forwarded-For parsing
   -unsafe-allow-dangerous-responses
     	Allow endpoints to return unescaped HTML when clients control response Content-Type (enables XSS attacks)
   -use-real-hostname
@@ -76,15 +96,22 @@ func TestLoadConfig(t *testing.T) {
 	}{
 		"defaults": {
 			wantCfg: &config{
-				ListenHost:           defaultListenHost,
-				ListenPort:           defaultListenPort,
-				MaxBodySize:          httpbin.DefaultMaxBodySize,
-				MaxDuration:          httpbin.DefaultMaxDuration,
-				LogFormat:            defaultLogFormat,
-				LogLevel:             slog.LevelInfo,
-				SrvMaxHeaderBytes:    defaultSrvMaxHeaderBytes,
-				SrvReadHeaderTimeout: defaultSrvReadHeaderTimeout,
-				SrvReadTimeout:       defaultSrvReadTimeout,
+				ListenHost:               defaultListenHost,
+				ListenPort:               defaultListenPort,
+				MaxBodySize:              httpbin.DefaultMaxBodySize,
+				MaxDuration:              httpbin.DefaultMaxDuration,
+				LogFormat:                defaultLogFormat,
+				LogLevel:                 slog.LevelInfo,
+				SrvMaxHeaderBytes:        defaultSrvMaxHeaderBytes,
+				SrvReadHeaderTimeout:     defaultSrvReadHeaderTimeout,
+				SrvReadTimeout:           defaultSrvReadTimeout,
+				SrvWriteTimeout:          defaultSrvWriteTimeout,
+				SrvIdleTimeout:           defaultSrvIdleTimeout,
+				RateLimitRate:            defaultRateLimitRate,
+				RateLimitBurst:           defaultRateLimitBurst,
+				RateLimitMaxIPs:          defaultRateLimitMaxIPs,
+				RateLimitEntryTTL:        defaultRateLimitEntryTTL,
+				RateLimitCleanupInterval: defaultRateLimitCleanupInterval,
 			},
 		},
 		"-h": {

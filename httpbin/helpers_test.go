@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"math/rand"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -17,7 +18,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/mccutchen/go-httpbin/v2/internal/testing/assert"
+	"github.com/galti3r/go-httpbin/v2/internal/testing/assert"
 )
 
 func mustParse(s string) *url.URL {
@@ -342,7 +343,7 @@ func TestGetClientIP(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, getClientIP(tc.given), tc.want, "incorrect client ip")
+			assert.Equal(t, getClientIP(tc.given, nil, false), tc.want, "incorrect client ip")
 		})
 	}
 }
@@ -706,4 +707,131 @@ func decodeServerTimings(headerVal string) map[string]serverTiming {
 		}
 	}
 	return timings
+}
+
+func TestParseDelayRange(t *testing.T) {
+	t.Parallel()
+
+	maxDuration := 10 * time.Second
+
+	okTests := []struct {
+		input   string
+		wantMin time.Duration
+		wantMax time.Duration
+	}{
+		{"5", 5 * time.Second, 5 * time.Second},
+		{"500ms", 500 * time.Millisecond, 500 * time.Millisecond},
+		{"2-8", 2 * time.Second, 8 * time.Second},
+		{"500ms-2s", 500 * time.Millisecond, 2 * time.Second},
+		{"0-10", 0, 10 * time.Second},
+		{"5-5", 5 * time.Second, 5 * time.Second},
+	}
+	for _, tc := range okTests {
+		t.Run("ok/"+tc.input, func(t *testing.T) {
+			t.Parallel()
+			minD, maxD, err := parseDelayRange(tc.input, maxDuration)
+			assert.NilError(t, err)
+			assert.Equal(t, minD, tc.wantMin, "wrong min duration")
+			assert.Equal(t, maxD, tc.wantMax, "wrong max duration")
+		})
+	}
+
+	badTests := []string{
+		"8-2",   // reversed
+		"0-999", // exceeds max
+		"abc",   // invalid
+		"",      // empty
+	}
+	for _, input := range badTests {
+		t.Run("bad/"+input, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := parseDelayRange(input, maxDuration)
+			if err == nil {
+				t.Fatalf("expected error for input %q", input)
+			}
+		})
+	}
+}
+
+func TestParseAcceptHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  int    // expected number of entries
+		first string // expected first media type
+	}{
+		{"", 0, ""},
+		{"application/json", 1, "application/json"},
+		{"text/html, application/json;q=0.9", 2, "text/html"},
+		{"text/html;q=0.5, application/json;q=1.0", 2, "application/json"},
+		{"*/*", 1, "*/*"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			t.Parallel()
+			entries := parseAcceptHeader(tc.input)
+			assert.Equal(t, len(entries), tc.want, "wrong entry count")
+			if tc.want > 0 {
+				assert.Equal(t, entries[0].mediaType, tc.first, "wrong first media type")
+			}
+		})
+	}
+}
+
+func TestGetClientIPTrustedProxies(t *testing.T) {
+	t.Parallel()
+
+	_, trusted, _ := net.ParseCIDR("10.0.0.0/8")
+	trustedProxies := []*net.IPNet{trusted}
+
+	tests := map[string]struct {
+		remoteAddr     string
+		xff            string
+		trustedProxies []*net.IPNet
+		configured     bool
+		want           string
+	}{
+		"trusted proxy, xff present": {
+			remoteAddr:     "10.0.0.1:1234",
+			xff:            "1.2.3.4, 10.0.0.2",
+			trustedProxies: trustedProxies,
+			configured:     true,
+			want:           "1.2.3.4",
+		},
+		"untrusted proxy": {
+			remoteAddr:     "192.168.1.1:1234",
+			xff:            "1.2.3.4",
+			trustedProxies: trustedProxies,
+			configured:     true,
+			want:           "192.168.1.1",
+		},
+		"trust none (empty slice)": {
+			remoteAddr:     "10.0.0.1:1234",
+			xff:            "1.2.3.4",
+			trustedProxies: []*net.IPNet{},
+			configured:     true,
+			want:           "10.0.0.1",
+		},
+		"not configured (trust all, backward compat)": {
+			remoteAddr:     "172.18.0.1:1234",
+			xff:            "1.2.3.4, 10.0.0.1",
+			trustedProxies: nil,
+			configured:     false,
+			want:           "1.2.3.4",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, _ := http.NewRequest("GET", "/", nil)
+			r.RemoteAddr = tc.remoteAddr
+			if tc.xff != "" {
+				r.Header.Set("X-Forwarded-For", tc.xff)
+			}
+			got := getClientIP(r, tc.trustedProxies, tc.configured)
+			assert.Equal(t, got, tc.want, "wrong client IP")
+		})
+	}
 }

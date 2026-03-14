@@ -10,15 +10,17 @@ import (
 	"html"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/mccutchen/go-httpbin/v2/httpbin/digest"
-	"github.com/mccutchen/go-httpbin/v2/httpbin/websocket"
+	"github.com/galti3r/go-httpbin/v2/httpbin/digest"
+	"github.com/galti3r/go-httpbin/v2/httpbin/websocket"
 )
 
 var nilValues = url.Values{}
@@ -60,7 +62,7 @@ func (h *HTTPBin) Get(w http.ResponseWriter, r *http.Request) {
 		Args:    r.URL.Query(),
 		Headers: getRequestHeaders(r, h.excludeHeadersProcessor),
 		Method:  r.Method,
-		Origin:  getClientIP(r),
+		Origin:  h.getClientIP(r),
 		URL:     getURL(r).String(),
 	})
 }
@@ -88,7 +90,7 @@ func (h *HTTPBin) RequestWithBody(w http.ResponseWriter, r *http.Request) {
 		Form:    nilValues,
 		Headers: getRequestHeaders(r, h.excludeHeadersProcessor),
 		Method:  r.Method,
-		Origin:  getClientIP(r),
+		Origin:  h.getClientIP(r),
 		URL:     getURL(r).String(),
 	}
 
@@ -108,7 +110,7 @@ func (h *HTTPBin) RequestWithBodyDiscard(w http.ResponseWriter, r *http.Request)
 			Args:    r.URL.Query(),
 			Headers: getRequestHeaders(r, h.excludeHeadersProcessor),
 			Method:  r.Method,
-			Origin:  getClientIP(r),
+			Origin:  h.getClientIP(r),
 			URL:     getURL(r).String(),
 		},
 	}
@@ -132,7 +134,7 @@ func (h *HTTPBin) Gzip(w http.ResponseWriter, r *http.Request) {
 		Args:    r.URL.Query(),
 		Headers: getRequestHeaders(r, h.excludeHeadersProcessor),
 		Method:  r.Method,
-		Origin:  getClientIP(r),
+		Origin:  h.getClientIP(r),
 		Gzipped: true,
 	})
 	gzw.Close()
@@ -155,7 +157,7 @@ func (h *HTTPBin) Deflate(w http.ResponseWriter, r *http.Request) {
 		Args:     r.URL.Query(),
 		Headers:  getRequestHeaders(r, h.excludeHeadersProcessor),
 		Method:   r.Method,
-		Origin:   getClientIP(r),
+		Origin:   h.getClientIP(r),
 		Deflated: true,
 	})
 	zw.Close()
@@ -171,7 +173,7 @@ func (h *HTTPBin) Deflate(w http.ResponseWriter, r *http.Request) {
 // IP echoes the IP address of the incoming request
 func (h *HTTPBin) IP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(http.StatusOK, w, &ipResponse{
-		Origin: getClientIP(r),
+		Origin: h.getClientIP(r),
 	})
 }
 
@@ -207,6 +209,7 @@ func createSpecialCases(prefix string) map[int]*statusCase {
     "image/svg+xml",
     "image/jpeg",
     "image/png",
+    "image/avif",
     "image/"
   ]
 }
@@ -275,6 +278,11 @@ func createSpecialCases(prefix string) map[int]*statusCase {
 			body: []byte("I'm a teapot!"),
 			headers: map[string]string{
 				"X-More-Info": "http://tools.ietf.org/html/rfc2324",
+			},
+		},
+		429: {
+			headers: map[string]string{
+				"Retry-After": "5",
 			},
 		},
 	}
@@ -595,7 +603,7 @@ func (h *HTTPBin) Stream(w http.ResponseWriter, r *http.Request) {
 	resp := &streamResponse{
 		Args:    r.URL.Query(),
 		Headers: getRequestHeaders(r, h.excludeHeadersProcessor),
-		Origin:  getClientIP(r),
+		Origin:  h.getClientIP(r),
 		URL:     getURL(r).String(),
 	}
 
@@ -653,12 +661,19 @@ func (h *HTTPBin) Trailers(w http.ResponseWriter, r *http.Request) {
 }
 
 // Delay waits for a given amount of time before responding, where the time may
-// be specified as a golang-style duration or seconds in floating point.
+// be specified as a golang-style duration or seconds in floating point. A range
+// like "2-8" or "500ms-2s" is also supported, in which case a random delay
+// within the range is chosen.
 func (h *HTTPBin) Delay(w http.ResponseWriter, r *http.Request) {
-	delay, err := parseBoundedDuration(r.PathValue("duration"), 0, h.MaxDuration)
+	minDelay, maxDelay, err := parseDelayRange(r.PathValue("duration"), h.MaxDuration)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid duration: %w", err))
 		return
+	}
+
+	delay := minDelay
+	if maxDelay > minDelay {
+		delay = minDelay + time.Duration(rand.Int63n(int64(maxDelay-minDelay+1)))
 	}
 
 	select {
@@ -892,7 +907,7 @@ func (h *HTTPBin) ETag(w http.ResponseWriter, r *http.Request) {
 		Args:    r.URL.Query(),
 		Headers: getRequestHeaders(r, h.excludeHeadersProcessor),
 		Method:  r.Method,
-		Origin:  getClientIP(r),
+		Origin:  h.getClientIP(r),
 		URL:     getURL(r).String(),
 	})
 
@@ -1050,27 +1065,76 @@ func (h *HTTPBin) doRedirect(w http.ResponseWriter, path string, code int) {
 // ImageAccept responds with an appropriate image based on the Accept header
 func (h *HTTPBin) ImageAccept(w http.ResponseWriter, r *http.Request) {
 	accept := r.Header.Get("Accept")
+	var kind string
 	switch {
 	case accept == "":
-		fallthrough // default to png
+		kind = "png"
 	case strings.Contains(accept, "image/*"):
-		fallthrough // default to png
+		kind = "png"
 	case strings.Contains(accept, "image/png"):
-		doImage(w, "png")
+		kind = "png"
 	case strings.Contains(accept, "image/webp"):
-		doImage(w, "webp")
+		kind = "webp"
 	case strings.Contains(accept, "image/svg+xml"):
-		doImage(w, "svg")
+		kind = "svg"
 	case strings.Contains(accept, "image/jpeg"):
-		doImage(w, "jpeg")
+		kind = "jpeg"
+	case strings.Contains(accept, "image/avif"):
+		kind = "avif"
 	default:
 		writeError(w, http.StatusUnsupportedMediaType, nil)
+		return
 	}
+
+	// If size parameter is present, delegate to Image handler logic
+	sizeParam := r.URL.Query().Get("size")
+	if sizeParam != "" {
+		// Inject the kind into PathValue by setting up a new request
+		r.SetPathValue("kind", kind)
+		h.Image(w, r)
+		return
+	}
+
+	doImage(w, kind)
 }
 
 // Image responds with an image of a specific kind, from /image/<kind>
 func (h *HTTPBin) Image(w http.ResponseWriter, r *http.Request) {
-	doImage(w, r.PathValue("kind"))
+	kind := r.PathValue("kind")
+
+	// Check for size parameter
+	sizeParam := r.URL.Query().Get("size")
+	if sizeParam != "" {
+		var targetSize int
+		switch sizeParam {
+		case "small":
+			targetSize = 50 * 1024 // ~50KB
+		case "medium":
+			targetSize = 500 * 1024 // ~500KB
+		case "large":
+			targetSize = 2 * 1024 * 1024 // ~2MB
+		default:
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid size %q: must be small, medium, or large", sizeParam))
+			return
+		}
+
+		// Dynamic generation only works for png and jpeg
+		switch kind {
+		case "png", "jpeg":
+			data, contentType, err := generateImage(kind, targetSize)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeResponse(w, http.StatusOK, contentType, data)
+			return
+		default:
+			writeError(w, http.StatusBadRequest, fmt.Errorf("size parameter only supported for png and jpeg, not %s", kind))
+			return
+		}
+	}
+
+	doImage(w, kind)
 }
 
 // doImage responds with a specific kind of image, if there is an image asset
@@ -1210,10 +1274,14 @@ func (h *HTTPBin) SSE(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	q := r.URL.Query()
 	var (
-		count    = h.DefaultParams.SSECount
-		duration = h.DefaultParams.SSEDuration
-		delay    = h.DefaultParams.SSEDelay
-		err      error
+		count       = h.DefaultParams.SSECount
+		duration    = h.DefaultParams.SSEDuration
+		delay       = h.DefaultParams.SSEDelay
+		eventName   string
+		retryMS     int
+		failAfter   int
+		lastEventID int
+		err         error
 	)
 
 	if userCount := q.Get("count"); userCount != "" {
@@ -1240,6 +1308,34 @@ func (h *HTTPBin) SSE(w http.ResponseWriter, r *http.Request) {
 		delay, err = parseBoundedDuration(userDelay, 0, h.MaxDuration)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid delay: %w", err))
+			return
+		}
+	}
+
+	if userEvent := q.Get("event"); userEvent != "" {
+		eventName = strings.ReplaceAll(strings.ReplaceAll(userEvent, "\n", ""), "\r", "")
+	}
+
+	if userRetry := q.Get("retry"); userRetry != "" {
+		retryMS, err = strconv.Atoi(userRetry)
+		if err != nil || retryMS < 0 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid retry: must be a non-negative integer"))
+			return
+		}
+	}
+
+	if userFailAfter := q.Get("fail_after"); userFailAfter != "" {
+		failAfter, err = strconv.Atoi(userFailAfter)
+		if err != nil || failAfter < 1 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid fail_after: must be a positive integer"))
+			return
+		}
+	}
+
+	if rawLastEventID := r.Header.Get("Last-Event-ID"); rawLastEventID != "" {
+		lastEventID, err = strconv.Atoi(rawLastEventID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid Last-Event-ID: %w", err))
 			return
 		}
 	}
@@ -1276,9 +1372,18 @@ func (h *HTTPBin) SSE(w http.ResponseWriter, r *http.Request) {
 
 	flusher := w.(http.Flusher)
 
+	// Write retry directive at the start of the stream if requested
+	if retryMS > 0 {
+		fmt.Fprintf(w, "retry: %d\n\n", retryMS)
+		flusher.Flush()
+	}
+
+	// Event IDs start after lastEventID (for SSE reconnection semantics)
+	startID := lastEventID + 1
+
 	// special case when we only have one event to write
 	if count == 1 {
-		writeServerSentEvent(w, 0, time.Now())
+		writeServerSentEvent(w, startID, time.Now(), eventName)
 		flusher.Flush()
 		return
 	}
@@ -1287,7 +1392,11 @@ func (h *HTTPBin) SSE(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 
 	for i := 0; i < count; i++ {
-		writeServerSentEvent(w, i, time.Now())
+		if failAfter > 0 && i >= failAfter {
+			return
+		}
+
+		writeServerSentEvent(w, startID+i, time.Now(), eventName)
 		flusher.Flush()
 
 		// don't pause after last byte
@@ -1305,9 +1414,14 @@ func (h *HTTPBin) SSE(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeServerSentEvent writes the bytes that constitute a single server-sent
-// event message, including both the event type and data.
-func writeServerSentEvent(dst io.Writer, id int, ts time.Time) {
-	dst.Write([]byte("event: ping\n"))
+// event message, including the event ID, optional event type, and data.
+func writeServerSentEvent(dst io.Writer, id int, ts time.Time, eventName string) {
+	fmt.Fprintf(dst, "id: %d\n", id)
+	if eventName != "" {
+		fmt.Fprintf(dst, "event: %s\n", strings.ReplaceAll(strings.ReplaceAll(eventName, "\n", ""), "\r", ""))
+	} else {
+		dst.Write([]byte("event: ping\n"))
+	}
 	dst.Write([]byte("data: "))
 	json.NewEncoder(dst).Encode(serverSentEvent{
 		ID:        id,
@@ -1365,4 +1479,148 @@ func (h *HTTPBin) WebSocketEcho(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ws.Serve(websocket.EchoHandler)
+}
+
+// Version returns the version of the go-httpbin instance and the Go runtime.
+func (h *HTTPBin) Version(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(http.StatusOK, w, &versionResponse{
+		Version:   h.version,
+		GoVersion: runtime.Version(),
+	})
+}
+
+// PDF returns a simple PDF document.
+func (h *HTTPBin) PDF(w http.ResponseWriter, _ *http.Request) {
+	writeResponse(w, http.StatusOK, "application/pdf", mustStaticAsset("sample.pdf"))
+}
+
+// ProblemDetails returns a Problem Details (RFC 9457) JSON response.
+func (h *HTTPBin) ProblemDetails(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	status := http.StatusOK
+	if rawStatus := q.Get("status"); rawStatus != "" {
+		var err error
+		status, err = parseStatusCode(rawStatus)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+
+	resp := &problemDetailResponse{
+		Type:     q.Get("type"),
+		Title:    q.Get("title"),
+		Status:   status,
+		Detail:   q.Get("detail"),
+		Instance: q.Get("instance"),
+	}
+	if resp.Type == "" {
+		resp.Type = "about:blank"
+	}
+	if resp.Title == "" {
+		resp.Title = http.StatusText(status)
+	}
+
+	w.Header().Set("Content-Type", problemContentType)
+	w.WriteHeader(status)
+	mustMarshalJSON(w, resp)
+}
+
+// Echo returns the request body back as the response, preserving the
+// Content-Type.
+func (h *HTTPBin) Echo(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("error reading request body: %w", err))
+		return
+	}
+	defer r.Body.Close()
+
+	ct := r.Header.Get("Content-Type")
+	if ct == "" {
+		ct = binaryContentType
+	}
+
+	// Escape dangerous content types to prevent XSS
+	if h.mustEscapeResponse(ct) {
+		ct = textContentType
+		body = []byte(html.EscapeString(string(body)))
+	}
+
+	writeResponse(w, http.StatusOK, ct, body)
+}
+
+// Close abruptly closes the TCP connection, optionally after sending headers
+// or partial data.
+func (h *HTTPBin) Close(w http.ResponseWriter, r *http.Request) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("server does not support hijacking"))
+		return
+	}
+
+	q := r.URL.Query()
+	mode := q.Get("mode")
+	after := q.Get("after")
+
+	conn, buf, err := hj.Hijack()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer conn.Close()
+
+	switch after {
+	case "headers":
+		buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n")
+		buf.Flush()
+	case "partial":
+		buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1024\r\n\r\n")
+		buf.WriteString("partial data...")
+		buf.Flush()
+	}
+
+	if mode == "reset" {
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetLinger(0)
+		}
+	}
+	// conn.Close() called by defer
+}
+
+var negotiateTypes = map[string]string{
+	"application/json": jsonContentType,
+	"text/html":        htmlContentType,
+	"text/plain":       textContentType,
+	"application/xml":  "application/xml; charset=utf-8",
+	"image/png":        "image/png",
+}
+
+// Negotiate performs server-driven content negotiation based on the Accept
+// header.
+func (h *HTTPBin) Negotiate(w http.ResponseWriter, r *http.Request) {
+	accept := r.Header.Get("Accept")
+	entries := parseAcceptHeader(accept)
+
+	w.Header().Set("Vary", "Accept")
+
+	// If no Accept header, default to JSON
+	if len(entries) == 0 {
+		writeJSON(http.StatusOK, w, map[string]string{"content_type": jsonContentType})
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.mediaType == "*/*" {
+			writeJSON(http.StatusOK, w, map[string]string{"content_type": jsonContentType})
+			return
+		}
+		if ct, ok := negotiateTypes[entry.mediaType]; ok {
+			writeJSON(http.StatusOK, w, map[string]string{"content_type": ct})
+			return
+		}
+	}
+
+	writeError(w, http.StatusNotAcceptable, fmt.Errorf("no matching content type for Accept: %s", accept))
 }

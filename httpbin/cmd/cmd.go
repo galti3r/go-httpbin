@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mccutchen/go-httpbin/v2/httpbin"
+	"github.com/galti3r/go-httpbin/v2/httpbin"
 )
 
 const (
@@ -35,7 +35,16 @@ const (
 	// Reasonable defaults for the underlying http.Server
 	defaultSrvReadTimeout       = 5 * time.Second
 	defaultSrvReadHeaderTimeout = 1 * time.Second
+	defaultSrvWriteTimeout      = 30 * time.Second
+	defaultSrvIdleTimeout       = 120 * time.Second
 	defaultSrvMaxHeaderBytes    = 16 * 1024 // 16kb
+
+	// Rate limiting defaults
+	defaultRateLimitRate            = 5.0
+	defaultRateLimitBurst           = 20
+	defaultRateLimitMaxIPs          = 100000
+	defaultRateLimitEntryTTL        = 5 * time.Minute
+	defaultRateLimitCleanupInterval = 30 * time.Second
 )
 
 // Main is the main entrypoint for the go-httpbin binary. See loadConfig() for
@@ -93,6 +102,29 @@ func mainImpl(args []string, getEnvVal func(string) string, getEnviron func() []
 	if cfg.UnsafeAllowDangerousResponses {
 		opts = append(opts, httpbin.WithUnsafeAllowDangerousResponses())
 	}
+	if cfg.rawTrustedProxies != "" {
+		cidrs, configured, err := httpbin.ParseTrustedProxies(cfg.rawTrustedProxies)
+		if err != nil {
+			fmt.Fprintf(out, "error: invalid trusted proxies: %s", err)
+			return 1
+		}
+		if configured {
+			opts = append(opts, httpbin.WithTrustedProxies(cidrs))
+		}
+	}
+	if cfg.RateLimitRate > 0 {
+		opts = append(opts, httpbin.WithRateLimiter(httpbin.RateLimiterConfig{
+			Rate:            cfg.RateLimitRate,
+			Burst:           cfg.RateLimitBurst,
+			MaxTrackedIPs:   cfg.RateLimitMaxIPs,
+			EntryLifetime:   cfg.RateLimitEntryTTL,
+			CleanupInterval: cfg.RateLimitCleanupInterval,
+			UseSubnets:      cfg.RateLimitUseSubnets,
+		}))
+	}
+	if cfg.MaxConcurrentRequests > 0 {
+		opts = append(opts, httpbin.WithMaxConcurrentRequests(cfg.MaxConcurrentRequests))
+	}
 	app := httpbin.New(opts...)
 
 	srv := &http.Server{
@@ -101,6 +133,8 @@ func mainImpl(args []string, getEnvVal func(string) string, getEnviron func() []
 		MaxHeaderBytes:    cfg.SrvMaxHeaderBytes,
 		ReadHeaderTimeout: cfg.SrvReadHeaderTimeout,
 		ReadTimeout:       cfg.SrvReadTimeout,
+		WriteTimeout:      cfg.SrvWriteTimeout,
+		IdleTimeout:       cfg.SrvIdleTimeout,
 	}
 
 	if err := listenAndServeGracefully(srv, cfg, logger); err != nil {
@@ -130,6 +164,16 @@ type config struct {
 	SrvMaxHeaderBytes      int
 	SrvReadHeaderTimeout   time.Duration
 	SrvReadTimeout         time.Duration
+	SrvWriteTimeout        time.Duration
+	SrvIdleTimeout         time.Duration
+
+	RateLimitRate            float64
+	RateLimitBurst           int
+	RateLimitMaxIPs          int
+	RateLimitEntryTTL        time.Duration
+	RateLimitCleanupInterval time.Duration
+	RateLimitUseSubnets      bool
+	MaxConcurrentRequests    int
 
 	// If true, endpoints that allow clients to specify a response
 	// Conntent-Type will NOT escape HTML entities in the response body, which
@@ -143,6 +187,7 @@ type config struct {
 	rawAllowedRedirectDomains string
 	rawLogLevel               string
 	rawUseRealHostname        bool
+	rawTrustedProxies         string
 }
 
 // ConfigError is used to signal an error with a command line argument or
@@ -181,6 +226,17 @@ func loadConfig(args []string, getEnvVal func(string) string, getEnviron func() 
 	fs.IntVar(&cfg.SrvMaxHeaderBytes, "srv-max-header-bytes", defaultSrvMaxHeaderBytes, "Value to use for the http.Server's MaxHeaderBytes option")
 	fs.DurationVar(&cfg.SrvReadHeaderTimeout, "srv-read-header-timeout", defaultSrvReadHeaderTimeout, "Value to use for the http.Server's ReadHeaderTimeout option")
 	fs.DurationVar(&cfg.SrvReadTimeout, "srv-read-timeout", defaultSrvReadTimeout, "Value to use for the http.Server's ReadTimeout option")
+	fs.DurationVar(&cfg.SrvWriteTimeout, "srv-write-timeout", defaultSrvWriteTimeout, "Value to use for the http.Server's WriteTimeout option")
+	fs.DurationVar(&cfg.SrvIdleTimeout, "srv-idle-timeout", defaultSrvIdleTimeout, "Value to use for the http.Server's IdleTimeout option")
+
+	fs.Float64Var(&cfg.RateLimitRate, "rate-limit-rate", defaultRateLimitRate, "Rate limit requests per second per IP (0 to disable)")
+	fs.IntVar(&cfg.RateLimitBurst, "rate-limit-burst", defaultRateLimitBurst, "Rate limit max burst size")
+	fs.IntVar(&cfg.RateLimitMaxIPs, "rate-limit-max-ips", defaultRateLimitMaxIPs, "Rate limit max tracked IP entries")
+	fs.DurationVar(&cfg.RateLimitEntryTTL, "rate-limit-entry-ttl", defaultRateLimitEntryTTL, "Rate limit TTL for idle entries")
+	fs.DurationVar(&cfg.RateLimitCleanupInterval, "rate-limit-cleanup-interval", defaultRateLimitCleanupInterval, "Rate limit background cleanup interval")
+	fs.BoolVar(&cfg.RateLimitUseSubnets, "rate-limit-use-subnets", false, "Rate limit by /24 (IPv4) or /64 (IPv6) subnets")
+	fs.IntVar(&cfg.MaxConcurrentRequests, "max-concurrent-requests", 0, "Maximum number of concurrent requests (0 for unlimited)")
+	fs.StringVar(&cfg.rawTrustedProxies, "trusted-proxies", "", "Comma-separated list of trusted proxy CIDRs for X-Forwarded-For parsing")
 
 	// Here be dragons! This flag is only for backwards compatibility and
 	// should not be used in production.
@@ -321,6 +377,61 @@ func loadConfig(args []string, getEnvVal func(string) string, getEnviron func() 
 			return nil, configErr("invalid value %#v for env var SRV_READ_TIMEOUT: parse error", getEnvVal("SRV_READ_TIMEOUT"))
 		}
 	}
+	if cfg.SrvWriteTimeout == defaultSrvWriteTimeout && getEnvVal("SRV_WRITE_TIMEOUT") != "" {
+		cfg.SrvWriteTimeout, err = time.ParseDuration(getEnvVal("SRV_WRITE_TIMEOUT"))
+		if err != nil {
+			return nil, configErr("invalid value %#v for env var SRV_WRITE_TIMEOUT: parse error", getEnvVal("SRV_WRITE_TIMEOUT"))
+		}
+	}
+	if cfg.SrvIdleTimeout == defaultSrvIdleTimeout && getEnvVal("SRV_IDLE_TIMEOUT") != "" {
+		cfg.SrvIdleTimeout, err = time.ParseDuration(getEnvVal("SRV_IDLE_TIMEOUT"))
+		if err != nil {
+			return nil, configErr("invalid value %#v for env var SRV_IDLE_TIMEOUT: parse error", getEnvVal("SRV_IDLE_TIMEOUT"))
+		}
+	}
+
+	if cfg.RateLimitRate == defaultRateLimitRate && getEnvVal("RATE_LIMIT_RATE") != "" {
+		cfg.RateLimitRate, err = strconv.ParseFloat(getEnvVal("RATE_LIMIT_RATE"), 64)
+		if err != nil {
+			return nil, configErr("invalid value %#v for env var RATE_LIMIT_RATE: parse error", getEnvVal("RATE_LIMIT_RATE"))
+		}
+	}
+	if cfg.RateLimitBurst == defaultRateLimitBurst && getEnvVal("RATE_LIMIT_BURST") != "" {
+		cfg.RateLimitBurst, err = strconv.Atoi(getEnvVal("RATE_LIMIT_BURST"))
+		if err != nil {
+			return nil, configErr("invalid value %#v for env var RATE_LIMIT_BURST: parse error", getEnvVal("RATE_LIMIT_BURST"))
+		}
+	}
+	if cfg.RateLimitMaxIPs == defaultRateLimitMaxIPs && getEnvVal("RATE_LIMIT_MAX_IPS") != "" {
+		cfg.RateLimitMaxIPs, err = strconv.Atoi(getEnvVal("RATE_LIMIT_MAX_IPS"))
+		if err != nil {
+			return nil, configErr("invalid value %#v for env var RATE_LIMIT_MAX_IPS: parse error", getEnvVal("RATE_LIMIT_MAX_IPS"))
+		}
+	}
+	if cfg.RateLimitEntryTTL == defaultRateLimitEntryTTL && getEnvVal("RATE_LIMIT_ENTRY_TTL") != "" {
+		cfg.RateLimitEntryTTL, err = time.ParseDuration(getEnvVal("RATE_LIMIT_ENTRY_TTL"))
+		if err != nil {
+			return nil, configErr("invalid value %#v for env var RATE_LIMIT_ENTRY_TTL: parse error", getEnvVal("RATE_LIMIT_ENTRY_TTL"))
+		}
+	}
+	if cfg.RateLimitCleanupInterval == defaultRateLimitCleanupInterval && getEnvVal("RATE_LIMIT_CLEANUP_INTERVAL") != "" {
+		cfg.RateLimitCleanupInterval, err = time.ParseDuration(getEnvVal("RATE_LIMIT_CLEANUP_INTERVAL"))
+		if err != nil {
+			return nil, configErr("invalid value %#v for env var RATE_LIMIT_CLEANUP_INTERVAL: parse error", getEnvVal("RATE_LIMIT_CLEANUP_INTERVAL"))
+		}
+	}
+	if getEnvBool(getEnvVal("RATE_LIMIT_USE_SUBNETS")) {
+		cfg.RateLimitUseSubnets = true
+	}
+	if cfg.MaxConcurrentRequests == 0 && getEnvVal("MAX_CONCURRENT_REQUESTS") != "" {
+		cfg.MaxConcurrentRequests, err = strconv.Atoi(getEnvVal("MAX_CONCURRENT_REQUESTS"))
+		if err != nil {
+			return nil, configErr("invalid value %#v for env var MAX_CONCURRENT_REQUESTS: parse error", getEnvVal("MAX_CONCURRENT_REQUESTS"))
+		}
+	}
+	if cfg.rawTrustedProxies == "" && getEnvVal("TRUSTED_PROXIES") != "" {
+		cfg.rawTrustedProxies = getEnvVal("TRUSTED_PROXIES")
+	}
 
 	if getEnvBool(getEnvVal("UNSAFE_ALLOW_DANGEROUS_RESPONSES")) {
 		cfg.UnsafeAllowDangerousResponses = true
@@ -330,6 +441,7 @@ func loadConfig(args []string, getEnvVal func(string) string, getEnviron func() 
 	cfg.rawAllowedRedirectDomains = ""
 	cfg.rawLogLevel = ""
 	cfg.rawUseRealHostname = false
+	cfg.rawTrustedProxies = ""
 
 	for _, envVar := range getEnviron() {
 		name, value, _ := strings.Cut(envVar, "=")

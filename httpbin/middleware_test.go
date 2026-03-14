@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/mccutchen/go-httpbin/v2/internal/testing/assert"
+	"github.com/galti3r/go-httpbin/v2/internal/testing/assert"
 )
 
 func TestTestMode(t *testing.T) {
@@ -18,7 +18,8 @@ func TestTestMode(t *testing.T) {
 	// early after writing an error response, and has helped identify and fix
 	// some subtly broken error handling.
 	observer := func(_ Result) {}
-	handler := observe(observer, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	clientIPFunc := func(r *http.Request) string { return extractRemoteIP(r.RemoteAddr) }
+	handler := observe(observer, clientIPFunc, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		w.WriteHeader(http.StatusOK)
 	}))
