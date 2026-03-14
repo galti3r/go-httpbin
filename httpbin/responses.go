@@ -109,3 +109,18 @@ type serverSentEvent struct {
 	ID        int   `json:"id"`
 	Timestamp int64 `json:"timestamp"`
 }
+
+type versionResponse struct {
+	Version   string `json:"version"`
+	GoVersion string `json:"go_version"`
+}
+
+const problemContentType = "application/problem+json; charset=utf-8"
+
+type problemDetailResponse struct {
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	Status   int    `json:"status"`
+	Detail   string `json:"detail,omitempty"`
+	Instance string `json:"instance,omitempty"`
+}
