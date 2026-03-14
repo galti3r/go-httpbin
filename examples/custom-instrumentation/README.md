@@ -13,5 +13,5 @@ dependencies outside of the Go stdlib, to make sure that it is as
 safe/lightweight as possible to include as a dependency in other applications'
 test suites where useful.
 
-[1]: https://pkg.go.dev/github.com/mccutchen/go-httpbin/v2/httpbin#Observer
-[2]: https://pkg.go.dev/github.com/mccutchen/go-httpbin/v2/httpbin#Result
+[1]: https://pkg.go.dev/github.com/galti3r/go-httpbin/v2/httpbin#Observer
+[2]: https://pkg.go.dev/github.com/galti3r/go-httpbin/v2/httpbin#Result

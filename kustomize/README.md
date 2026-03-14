@@ -8,9 +8,9 @@ kind: Kustomization
 commonLabels:
   app.kubernetes.io/name: httpbin
 resources:
-  - github.com/mccutchen/go-httpbin/kustomize
+  - github.com/galti3r/go-httpbin/kustomize
 images:
-  - name: mccutchen/go-httpbin
+  - name: galti3r/go-httpbin
 ```
 
 To expose your instance to the internet, you could add an `Ingress` in an overlay:

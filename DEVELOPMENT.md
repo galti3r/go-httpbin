@@ -56,11 +56,6 @@ which may or may not include wildcards:
 
 ### Test coverage
 
-We use [Codecov][] to measure and track test coverage as part of our continuous
-integration test suite. While we strive for as much coverage as possible and
-the Codecov CI check is configured with fairly strict requirements, 100% test
-coverage is not an explicit goal or requirement for all contributions.
-
 To view test coverage locally, use
 
     make testcover
@@ -87,7 +82,7 @@ To build a docker image an push it to a remote repository:
 
     make imagepush
 
-By default, images will be tagged as `mccutchen/go-httpbin:${COMMIT}` with the
+By default, images will be tagged as `ghcr.io/galti3r/go-httpbin:${COMMIT}` with the
 current HEAD commit hash.
 
 Use `VERSION` to override the tag value
@@ -109,5 +104,4 @@ linux/arm64 architectures.
 [revive]: https://github.com/mgechev/revive
 [staticcheck]: https://staticcheck.dev/
 [Release]: /.github/workflows/release.yaml
-[Codecov]: https://app.codecov.io/gh/mccutchen/go-httpbin
 [Autobahn Testsuite]: https://github.com/crossbario/autobahn-testsuite
