@@ -330,6 +330,32 @@ public internet, consider tuning it appropriately:
    The delay is bounded by `-max-duration`/`MAX_DURATION` (default 10s).
    Invalid or excessive values return `400 Bad Request`.
 
+8. **Pipeline composable URLs**
+
+   Any endpoint can be prefixed with `delay/:duration` or
+   `response_delay/:duration` modifiers to add initial delays. The image
+   endpoint also supports path-based parameters and filename extensions.
+
+   ```bash
+   # Delay 1 second before returning status 418
+   curl http://localhost:8080/delay/1/status/418
+
+   # Generate a ~50KB PNG image with vanity filename
+   curl http://localhost:8080/image/size/small/photo.png -o photo.png
+
+   # Random 2-4s delay before echoing request
+   curl http://localhost:8080/delay/2-4/get
+
+   # Redirect chain: 3 redirects ending at an image
+   curl -L http://localhost:8080/redirect/3/image/photo.png -o image.png
+
+   # Combine delay + redirect chain
+   curl -L http://localhost:8080/delay/1/redirect/2/status/200
+   ```
+
+   All delays are bounded by `-max-duration`/`MAX_DURATION` (default 10s).
+   Multiple modifiers are cumulative and their total must not exceed the limit.
+
 ## Development
 
 See [DEVELOPMENT.md][].
@@ -369,6 +395,8 @@ Additional endpoints not in the original httpbin:
  - Enhanced `/delay` with range syntax (e.g. `/delay/2-8`)
  - Global `?response_delay=` query parameter on all endpoints
  - Per-IP rate limiting and concurrent request limiting
+ - Pipeline composable URLs: chain `delay/`, `response_delay/` modifiers with any endpoint
+   (e.g. `/delay/1/status/418`, `/image/size/large/photo.png`, `/redirect/3/get`)
 
 
 [ahmet]: https://github.com/ahmetb/go-httpbin

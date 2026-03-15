@@ -16,12 +16,12 @@ type mixDirective struct {
 
 // mixAllowedHeaders is the allowlist of headers that can be set via /mix
 var mixAllowedHeaders = map[string]bool{
-	"retry-after":              true,
-	"cache-control":            true,
-	"content-language":         true,
-	"x-ratelimit-limit":       true,
-	"x-ratelimit-remaining":   true,
-	"x-ratelimit-reset":       true,
+	"retry-after":           true,
+	"cache-control":         true,
+	"content-language":      true,
+	"x-ratelimit-limit":     true,
+	"x-ratelimit-remaining": true,
+	"x-ratelimit-reset":     true,
 }
 
 func isAllowedMixHeader(name string) bool {

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1098,9 +1099,23 @@ func (h *HTTPBin) ImageAccept(w http.ResponseWriter, r *http.Request) {
 	doImage(w, kind)
 }
 
+// imageExtToHandlerKind maps file extensions to image kind names for vanity URLs.
+var imageExtToHandlerKind = map[string]string{
+	".png": "png", ".jpeg": "jpeg", ".jpg": "jpeg",
+	".svg": "svg", ".webp": "webp", ".avif": "avif",
+}
+
 // Image responds with an image of a specific kind, from /image/<kind>
 func (h *HTTPBin) Image(w http.ResponseWriter, r *http.Request) {
 	kind := r.PathValue("kind")
+
+	// Support vanity URLs like /image/photo.png → kind=png
+	if ext := strings.ToLower(path.Ext(kind)); ext != "" {
+		if resolved, ok := imageExtToHandlerKind[ext]; ok {
+			kind = resolved
+			r.SetPathValue("kind", kind)
+		}
+	}
 
 	// Check for size parameter
 	sizeParam := r.URL.Query().Get("size")
