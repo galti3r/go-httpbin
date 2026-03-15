@@ -1456,9 +1456,9 @@ func TestRedirects(t *testing.T) {
 		requestURL     string
 		expectedStatus int
 	}{
-		// With pipeline subtree routes, bare paths return 301 (Go auto-redirect
-		// to trailing slash) and trailing slash returns 400 (empty pipeline).
-		{"%s/redirect", http.StatusMovedPermanently},
+		// With pipeline subtree routes, trailing slash returns 400 (empty pipeline).
+		// Bare paths (e.g. /redirect) are omitted: Go mux auto-redirects to
+		// trailing slash with a version-dependent status code (301 or 307).
 		{"%s/redirect/", http.StatusBadRequest},
 		{"%s/redirect/-1", http.StatusBadRequest},
 		{"%s/redirect/3.14", http.StatusBadRequest},
@@ -1466,14 +1466,12 @@ func TestRedirects(t *testing.T) {
 		// /redirect/10/foo is a valid pipeline URL (redirect 10x to /foo)
 		{"%s/redirect/10/foo", http.StatusFound},
 
-		{"%s/relative-redirect", http.StatusMovedPermanently},
 		{"%s/relative-redirect/", http.StatusBadRequest},
 		{"%s/relative-redirect/-1", http.StatusBadRequest},
 		{"%s/relative-redirect/3.14", http.StatusBadRequest},
 		{"%s/relative-redirect/foo", http.StatusBadRequest},
 		{"%s/relative-redirect/10/foo", http.StatusFound},
 
-		{"%s/absolute-redirect", http.StatusMovedPermanently},
 		{"%s/absolute-redirect/", http.StatusBadRequest},
 		{"%s/absolute-redirect/-1", http.StatusBadRequest},
 		{"%s/absolute-redirect/3.14", http.StatusBadRequest},
