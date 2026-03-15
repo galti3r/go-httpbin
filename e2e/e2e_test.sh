@@ -466,6 +466,130 @@ assert_body_contains "/mix combo body OK" "OK" "$BASE_URL/mix/s=201/h=X-Req-Id:a
 
 
 # ============================================================================
+# Section: Pipeline Composable URLs
+# ============================================================================
+echo ""
+echo "=== Pipeline Composable URLs ==="
+
+# P1. /delay/0/status/418 -> 418
+assert_status "pipeline: delay+status/418" 418 "$BASE_URL/delay/0/status/418"
+
+# P2. /delay/0/get -> 200
+assert_status "pipeline: delay+get" 200 "$BASE_URL/delay/0/get"
+
+# P3. /delay/0/get body contains "url"
+assert_body_contains "pipeline: get url field" '"url"' "$BASE_URL/delay/0/get"
+
+# P4. /response_delay/0/status/200 -> 200
+assert_status "pipeline: response_delay+status" 200 "$BASE_URL/response_delay/0/status/200"
+
+# P5. /image/size/small/photo.png -> 200
+assert_status "pipeline: image size small png" 200 "$BASE_URL/image/size/small/photo.png"
+
+# P6. /image/size/small/photo.png Content-Type: image/png
+assert_header "pipeline: image png content-type" "$BASE_URL/image/size/small/photo.png" "Content-Type" "image/png"
+
+# P7. /image/size/small/thumb.jpeg -> 200
+assert_status "pipeline: image small jpeg" 200 "$BASE_URL/image/size/small/thumb.jpeg"
+
+# P8. /image/wallpaper.png -> 200
+assert_status "pipeline: image vanity png" 200 "$BASE_URL/image/wallpaper.png"
+
+# P9. /image/photo.jpg -> 200
+assert_status "pipeline: image vanity jpg" 200 "$BASE_URL/image/photo.jpg"
+
+# P10. /redirect/3/status/200 -> 302
+assert_status "pipeline: redirect/3/status/200" 302 "$BASE_URL/redirect/3/status/200"
+
+# P11. /redirect/3/status/200 Location contains /redirect/2/status/200
+assert_header "pipeline: redirect location" "$BASE_URL/redirect/3/status/200" "Location" "/redirect/2/status/200"
+
+# P12. /redirect/1/get -> 302, Location: /get
+assert_header "pipeline: redirect/1/get location" "$BASE_URL/redirect/1/get" "Location" "/get"
+
+# P13. /delay/0/redirect/2/get modifiers preserved in redirect
+assert_header "pipeline: modifiers in redirect" "$BASE_URL/delay/0/redirect/2/get" "Location" "/delay/0/redirect/1/get"
+
+# P14. /delay/0/bytes/1024 -> 200
+assert_status "pipeline: delay+bytes" 200 "$BASE_URL/delay/0/bytes/1024"
+
+# P15. /delay/0/html -> 200
+assert_status "pipeline: delay+html" 200 "$BASE_URL/delay/0/html"
+
+# P16. /delay/0/json -> 200
+assert_status "pipeline: delay+json" 200 "$BASE_URL/delay/0/json"
+
+# P17. /delay/0/uuid -> 200, body contains "uuid"
+assert_body_contains "pipeline: uuid" '"uuid"' "$BASE_URL/delay/0/uuid"
+
+# P18. /delay/0/cookies/set?test=val -> 302
+assert_status "pipeline: cookies/set" 302 "$BASE_URL/delay/0/cookies/set?test=val"
+
+# P19. /delay/0/encoding/utf8 -> 200
+assert_status "pipeline: encoding/utf8" 200 "$BASE_URL/delay/0/encoding/utf8"
+
+echo ""
+echo "=== Pipeline Security ==="
+
+# S1. /delay/999/get -> 400 (delay exceeds max)
+assert_status "pipeline: delay>max rejected" 400 "$BASE_URL/delay/999/get"
+
+# S2. /delay/6/response_delay/6/get -> 400 (cumulative exceeds max)
+assert_status "pipeline: cumul delay rejected" 400 "$BASE_URL/delay/6/response_delay/6/get"
+
+# S3. /delay/abc/get -> 400 (invalid delay)
+assert_status "pipeline: invalid delay" 400 "$BASE_URL/delay/abc/get"
+
+# S4. /delay/0/status/abc -> 400 (invalid status)
+assert_status "pipeline: invalid status" 400 "$BASE_URL/delay/0/status/abc"
+
+# S5. /image/size/huge/x.png -> 400 (invalid size)
+assert_status "pipeline: invalid image size" 400 "$BASE_URL/image/size/huge/x.png"
+
+# S6. /image/size/large/x.svg -> 400 (SVG+size unsupported)
+assert_status "pipeline: svg+size rejected" 400 "$BASE_URL/image/size/large/x.svg"
+
+# S7. POST /delay/0/get -> 405 (method restricted)
+assert_status "pipeline: POST on GET endpoint" 405 -X POST "$BASE_URL/delay/0/get"
+
+# S8. /delay/0/unknown/foo -> 400 (unknown terminal)
+assert_status "pipeline: unknown terminal" 400 "$BASE_URL/delay/0/unknown/foo"
+
+echo ""
+echo "=== Pipeline Timing ==="
+
+# T1. /delay/1/status/200 timing >= 1000ms
+assert_timing_min "pipeline: delay/1 timing" 1000 "$BASE_URL/delay/1/status/200"
+
+# T2. /response_delay/1/get timing >= 1000ms
+assert_timing_min "pipeline: response_delay/1 timing" 1000 "$BASE_URL/response_delay/1/get"
+
+echo ""
+echo "=== Pipeline Backward Compat ==="
+
+# BC1. /image/png -> 200 (existing route unchanged)
+assert_status "pipeline compat: /image/png" 200 "$BASE_URL/image/png"
+
+# BC2. /delay/0 -> 200 (existing route unchanged)
+assert_status "pipeline compat: /delay/0" 200 "$BASE_URL/delay/0"
+
+# BC3. /redirect/1 -> 302 (existing route unchanged)
+assert_status "pipeline compat: /redirect/1" 302 "$BASE_URL/redirect/1"
+
+echo ""
+echo "=== Pipeline via Nginx Proxy ==="
+
+# NP1. Pipeline via reverse proxy
+assert_status "proxy pipeline: status/418" 418 "$PROXY_URL/delay/0/status/418"
+
+# NP2. Image vanity via proxy
+assert_status "proxy pipeline: image vanity" 200 "$PROXY_URL/image/size/small/photo.png"
+
+# NP3. Redirect chain via proxy
+assert_status "proxy pipeline: redirect" 302 "$PROXY_URL/redirect/2/get"
+
+
+# ============================================================================
 # Section: Rate Limiting (uses a separate container with low limits)
 # ============================================================================
 echo ""

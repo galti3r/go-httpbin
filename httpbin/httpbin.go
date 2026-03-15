@@ -237,6 +237,14 @@ func (h *HTTPBin) Handler() http.Handler {
 
 	mux.HandleFunc("/mix/", h.Mix)
 
+	// Pipeline composable subtree routes
+	mux.HandleFunc("/delay/", h.Pipeline)
+	mux.HandleFunc("/response_delay/", h.Pipeline)
+	mux.HandleFunc("/image/", h.Pipeline)
+	mux.HandleFunc("/redirect/", h.Pipeline)
+	mux.HandleFunc("/absolute-redirect/", h.Pipeline)
+	mux.HandleFunc("/relative-redirect/", h.Pipeline)
+
 	// existing httpbin endpoints that we do not support
 	mux.HandleFunc("/brotli", notImplementedHandler)
 

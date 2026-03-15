@@ -1456,26 +1456,29 @@ func TestRedirects(t *testing.T) {
 		requestURL     string
 		expectedStatus int
 	}{
-		{"%s/redirect", http.StatusNotFound},
-		{"%s/redirect/", http.StatusNotFound},
+		// With pipeline subtree routes, bare paths return 301 (Go auto-redirect
+		// to trailing slash) and trailing slash returns 400 (empty pipeline).
+		{"%s/redirect", http.StatusMovedPermanently},
+		{"%s/redirect/", http.StatusBadRequest},
 		{"%s/redirect/-1", http.StatusBadRequest},
 		{"%s/redirect/3.14", http.StatusBadRequest},
 		{"%s/redirect/foo", http.StatusBadRequest},
-		{"%s/redirect/10/foo", http.StatusNotFound},
+		// /redirect/10/foo is a valid pipeline URL (redirect 10x to /foo)
+		{"%s/redirect/10/foo", http.StatusFound},
 
-		{"%s/relative-redirect", http.StatusNotFound},
-		{"%s/relative-redirect/", http.StatusNotFound},
+		{"%s/relative-redirect", http.StatusMovedPermanently},
+		{"%s/relative-redirect/", http.StatusBadRequest},
 		{"%s/relative-redirect/-1", http.StatusBadRequest},
 		{"%s/relative-redirect/3.14", http.StatusBadRequest},
 		{"%s/relative-redirect/foo", http.StatusBadRequest},
-		{"%s/relative-redirect/10/foo", http.StatusNotFound},
+		{"%s/relative-redirect/10/foo", http.StatusFound},
 
-		{"%s/absolute-redirect", http.StatusNotFound},
-		{"%s/absolute-redirect/", http.StatusNotFound},
+		{"%s/absolute-redirect", http.StatusMovedPermanently},
+		{"%s/absolute-redirect/", http.StatusBadRequest},
 		{"%s/absolute-redirect/-1", http.StatusBadRequest},
 		{"%s/absolute-redirect/3.14", http.StatusBadRequest},
 		{"%s/absolute-redirect/foo", http.StatusBadRequest},
-		{"%s/absolute-redirect/10/foo", http.StatusNotFound},
+		{"%s/absolute-redirect/10/foo", http.StatusFound},
 	}
 
 	for _, prefix := range []string{"", "/test-prefix"} {
@@ -2145,9 +2148,10 @@ func TestDelay(t *testing.T) {
 		url  string
 		code int
 	}{
-		{"/delay", http.StatusNotFound},
+		// /delay/foo goes to existing Delay handler (invalid duration)
 		{"/delay/foo", http.StatusBadRequest},
-		{"/delay/1/foo", http.StatusNotFound},
+		// /delay/1/foo is caught by pipeline subtree → 400 (unknown terminal "foo")
+		{"/delay/1/foo", http.StatusBadRequest},
 
 		{"/delay/1.5s", http.StatusBadRequest},
 		{"/delay/-1ms", http.StatusBadRequest},
@@ -3698,7 +3702,6 @@ func TestUpload(t *testing.T) {
 				assert.DeepEqual(t, result.BytesReceived, int64(len(test.requestBody)), "BytesReceived should match requestedBody size")
 			})
 		}
-
 	}
 }
 
@@ -3742,7 +3745,7 @@ func TestWebSocketEcho(t *testing.T) {
 		})
 	})
 
-	var maxBodySize = 1024
+	maxBodySize := 1024
 	paramTests := []struct {
 		query      string
 		wantStatus int

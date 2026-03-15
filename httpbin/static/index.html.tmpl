@@ -100,8 +100,10 @@
 <li><a href="{{.Prefix}}/image/avif"><code>{{.Prefix}}/image/avif</code></a> Returns an AVIF image.</li>
 <li><a href="{{.Prefix}}/image/jpeg"><code>{{.Prefix}}/image/jpeg</code></a> Returns a JPEG image. Accepts <code>?size=small|medium|large</code>.</li>
 <li><a href="{{.Prefix}}/image/png"><code>{{.Prefix}}/image/png</code></a> Returns a PNG image. Accepts <code>?size=small|medium|large</code>.</li>
-<li><a href="{{.Prefix}}/image/svg"><code>{{.Prefix}}/image/svg</code></a> Returns a SVG image. Accepts <code>?size=small|medium|large</code>.</li>
-<li><a href="{{.Prefix}}/image/webp"><code>{{.Prefix}}/image/webp</code></a> Returns a WEBP image. Accepts <code>?size=small|medium|large</code>.</li>
+<li><a href="{{.Prefix}}/image/svg"><code>{{.Prefix}}/image/svg</code></a> Returns a SVG image.</li>
+<li><a href="{{.Prefix}}/image/webp"><code>{{.Prefix}}/image/webp</code></a> Returns a WEBP image.</li>
+<li><a href="{{.Prefix}}/image/photo.png"><code>{{.Prefix}}/image/photo.{ext}</code></a> Returns an image based on file extension (.png, .jpeg, .jpg, .svg, .webp, .avif).</li>
+<li><a href="{{.Prefix}}/image/size/small/photo.png"><code>{{.Prefix}}/image/size/{small|medium|large}/filename.{ext}</code></a> Returns a generated image of the given size (PNG and JPEG only).</li>
 <li><a href="{{.Prefix}}/ip"><code>{{.Prefix}}/ip</code></a> Returns Origin IP.</li>
 <li><a href="{{.Prefix}}/json"><code>{{.Prefix}}/json</code></a> Returns JSON.</li>
 <li><a href="{{.Prefix}}/links/10"><code>{{.Prefix}}/links/:n</code></a> Returns page containing <em>n</em> HTML links.</li>
@@ -192,6 +194,29 @@ Date: Tue, 13 Jul 2021 13:12:37 GMT
 Content-Length: 0
 </code></pre>
 
+
+<h2 id="PIPELINE">PIPELINE: COMPOSABLE URLs</h2>
+
+<p>Chain operations directly in the URL path. Prefix any endpoint
+with one or more <strong>modifiers</strong> to add delays, then
+specify a <strong>terminal</strong> endpoint.</p>
+
+<h3>Modifiers</h3>
+<ul>
+<li><code>delay/:duration</code> &mdash; Add a delay (e.g. <code>delay/1</code>, <code>delay/500ms</code>, <code>delay/2-4</code> for random range)</li>
+<li><code>response_delay/:duration</code> &mdash; Same as delay (alternative name)</li>
+</ul>
+
+<h3>Examples</h3>
+<ul>
+<li><a href="{{.Prefix}}/delay/1/status/418"><code>{{.Prefix}}/delay/1/status/418</code></a> &mdash; Wait 1s, then return 418 I'm a Teapot</li>
+<li><a href="{{.Prefix}}/delay/500ms/get"><code>{{.Prefix}}/delay/500ms/get</code></a> &mdash; Wait 500ms, then return request data</li>
+<li><a href="{{.Prefix}}/image/size/small/photo.png"><code>{{.Prefix}}/image/size/small/photo.png</code></a> &mdash; Serve a dynamically generated ~50KB PNG image</li>
+<li><a href="{{.Prefix}}/image/photo.jpeg"><code>{{.Prefix}}/image/photo.jpeg</code></a> &mdash; Serve a JPEG image with vanity filename</li>
+<li><a href="{{.Prefix}}/redirect/3/status/200"><code>{{.Prefix}}/redirect/3/status/200</code></a> &mdash; Redirect 3 times, ending with status 200</li>
+<li><a href="{{.Prefix}}/delay/1/redirect/3/image/photo.png"><code>{{.Prefix}}/delay/1/redirect/3/image/photo.png</code></a> &mdash; Wait 1s, redirect 3 times, serve PNG image</li>
+<li><a href="{{.Prefix}}/delay/2-4/bytes/1024"><code>{{.Prefix}}/delay/2-4/bytes/1024</code></a> &mdash; Random 2-4s delay, then 1024 random bytes</li>
+</ul>
 
 <h2 id="AUTHOR">AUTHOR</h2>
 
