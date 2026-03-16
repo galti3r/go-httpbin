@@ -753,6 +753,246 @@ func TestParseDelayRange(t *testing.T) {
 	}
 }
 
+func TestParseHexColor(t *testing.T) {
+	t.Parallel()
+
+	okTests := []struct {
+		input string
+		want  [3]uint8
+	}{
+		{"FF0000", [3]uint8{255, 0, 0}},
+		{"00FF00", [3]uint8{0, 255, 0}},
+		{"0000FF", [3]uint8{0, 0, 255}},
+		{"#AABBCC", [3]uint8{0xAA, 0xBB, 0xCC}},
+		{"ffffff", [3]uint8{255, 255, 255}},
+		{"000000", [3]uint8{0, 0, 0}},
+	}
+	for _, tc := range okTests {
+		t.Run("ok/"+tc.input, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseHexColor(tc.input)
+			assert.NilError(t, err)
+			assert.DeepEqual(t, got, tc.want, "wrong color")
+		})
+	}
+
+	badTests := []string{
+		"",
+		"FFF",
+		"GGHHII",
+		"#12345",
+		"1234567",
+		"xyz",
+	}
+	for _, input := range badTests {
+		t.Run("bad/"+input, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseHexColor(input)
+			if err == nil {
+				t.Fatalf("expected error for %q", input)
+			}
+		})
+	}
+}
+
+func TestParseGradientConfig(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default_no_params", func(t *testing.T) {
+		t.Parallel()
+		params := url.Values{}
+		grad, err := parseGradientConfig(params)
+		assert.NilError(t, err)
+		assert.Equal(t, grad.Name, "default", "wrong name")
+		assert.Equal(t, grad.Noise, 64, "wrong noise")
+	})
+
+	t.Run("preset_warm", func(t *testing.T) {
+		t.Parallel()
+		params := url.Values{"gradient": {"warm"}}
+		grad, err := parseGradientConfig(params)
+		assert.NilError(t, err)
+		assert.Equal(t, grad.Name, "warm", "wrong name")
+		assert.DeepEqual(t, grad.Color1, [3]uint8{0xFF, 0x45, 0x00}, "wrong color1")
+	})
+
+	t.Run("preset_default", func(t *testing.T) {
+		t.Parallel()
+		params := url.Values{"gradient": {"default"}}
+		grad, err := parseGradientConfig(params)
+		assert.NilError(t, err)
+		assert.Equal(t, grad.Name, "default", "wrong name")
+	})
+
+	t.Run("custom_colors", func(t *testing.T) {
+		t.Parallel()
+		params := url.Values{"color1": {"FF0000"}, "color2": {"0000FF"}}
+		grad, err := parseGradientConfig(params)
+		assert.NilError(t, err)
+		assert.DeepEqual(t, grad.Color1, [3]uint8{255, 0, 0}, "wrong color1")
+		assert.DeepEqual(t, grad.Color2, [3]uint8{0, 0, 255}, "wrong color2")
+	})
+
+	t.Run("custom_noise_override", func(t *testing.T) {
+		t.Parallel()
+		params := url.Values{"gradient": {"warm"}, "noise": {"32"}}
+		grad, err := parseGradientConfig(params)
+		assert.NilError(t, err)
+		assert.Equal(t, grad.Noise, 32, "wrong noise")
+	})
+
+	t.Run("error_preset_with_color1", func(t *testing.T) {
+		t.Parallel()
+		params := url.Values{"gradient": {"warm"}, "color1": {"FF0000"}}
+		_, err := parseGradientConfig(params)
+		if err == nil {
+			t.Fatal("expected error for gradient+color1 conflict")
+		}
+	})
+
+	t.Run("error_unknown_preset", func(t *testing.T) {
+		t.Parallel()
+		params := url.Values{"gradient": {"nonexistent"}}
+		_, err := parseGradientConfig(params)
+		if err == nil {
+			t.Fatal("expected error for unknown preset")
+		}
+	})
+
+	t.Run("error_bad_hex", func(t *testing.T) {
+		t.Parallel()
+		params := url.Values{"color1": {"ZZZZZZ"}, "color2": {"000000"}}
+		_, err := parseGradientConfig(params)
+		if err == nil {
+			t.Fatal("expected error for bad hex color")
+		}
+	})
+
+	t.Run("error_noise_out_of_range", func(t *testing.T) {
+		t.Parallel()
+		params := url.Values{"noise": {"999"}}
+		_, err := parseGradientConfig(params)
+		if err == nil {
+			t.Fatal("expected error for noise > 255")
+		}
+	})
+
+	t.Run("error_color1_without_color2", func(t *testing.T) {
+		t.Parallel()
+		params := url.Values{"color1": {"FF0000"}}
+		_, err := parseGradientConfig(params)
+		if err == nil {
+			t.Fatal("expected error for color1 without color2")
+		}
+	})
+}
+
+func TestGenerateImageGradient(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default_deterministic", func(t *testing.T) {
+		t.Parallel()
+		grad := defaultGradient()
+		data1, ct1, err := generateImage("png", 1024, grad, 42)
+		assert.NilError(t, err)
+		assert.Equal(t, ct1, "image/png", "wrong content type")
+
+		data2, _, err := generateImage("png", 1024, grad, 42)
+		assert.NilError(t, err)
+		assert.DeepEqual(t, data1, data2, "same seed should produce same image")
+	})
+
+	t.Run("different_gradients_differ", func(t *testing.T) {
+		t.Parallel()
+		warm := gradientPresets["warm"]
+		cool := gradientPresets["cool"]
+		data1, _, err := generateImage("png", 1024, warm, 42)
+		assert.NilError(t, err)
+		data2, _, err := generateImage("png", 1024, cool, 42)
+		assert.NilError(t, err)
+		if string(data1) == string(data2) {
+			t.Fatal("different gradients should produce different images")
+		}
+	})
+
+	t.Run("different_seed_differs", func(t *testing.T) {
+		t.Parallel()
+		grad := defaultGradient()
+		data1, _, err := generateImage("png", 1024, grad, 42)
+		assert.NilError(t, err)
+		data2, _, err := generateImage("png", 1024, grad, 99)
+		assert.NilError(t, err)
+		if string(data1) == string(data2) {
+			t.Fatal("different seeds should produce different images")
+		}
+	})
+
+	t.Run("jpeg_format", func(t *testing.T) {
+		t.Parallel()
+		grad := defaultGradient()
+		_, ct, err := generateImage("jpeg", 1024, grad, 42)
+		assert.NilError(t, err)
+		assert.Equal(t, ct, "image/jpeg", "wrong content type")
+	})
+
+	t.Run("unsupported_format", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := generateImage("gif", 1024, defaultGradient(), 42)
+		if err == nil {
+			t.Fatal("expected error for unsupported format")
+		}
+	})
+}
+
+func TestImageCache(t *testing.T) {
+	t.Parallel()
+
+	t.Run("get_miss", func(t *testing.T) {
+		t.Parallel()
+		cache := newImageCache(10)
+		key := imageCacheKey{format: "png", targetSize: 1024, grad: defaultGradient()}
+		_, ok := cache.get(key)
+		assert.Equal(t, ok, false, "expected cache miss")
+	})
+
+	t.Run("put_get_hit", func(t *testing.T) {
+		t.Parallel()
+		cache := newImageCache(10)
+		key := imageCacheKey{format: "png", targetSize: 1024, grad: defaultGradient()}
+		entry := imageCacheEntry{data: []byte("test"), contentType: "image/png", etag: `"abc"`}
+		cache.put(key, entry)
+		got, ok := cache.get(key)
+		assert.Equal(t, ok, true, "expected cache hit")
+		assert.DeepEqual(t, got.data, entry.data, "wrong data")
+	})
+
+	t.Run("eviction_at_max_size", func(t *testing.T) {
+		t.Parallel()
+		cache := newImageCache(2)
+		key1 := imageCacheKey{format: "png", targetSize: 1024, grad: defaultGradient()}
+		key2 := imageCacheKey{format: "jpeg", targetSize: 1024, grad: defaultGradient()}
+		key3 := imageCacheKey{format: "png", targetSize: 2048, grad: defaultGradient()}
+
+		cache.put(key1, imageCacheEntry{data: []byte("1")})
+		cache.put(key2, imageCacheEntry{data: []byte("2")})
+		// This should evict one entry
+		cache.put(key3, imageCacheEntry{data: []byte("3")})
+
+		// At least 2 entries should exist
+		hits := 0
+		if _, ok := cache.get(key1); ok {
+			hits++
+		}
+		if _, ok := cache.get(key2); ok {
+			hits++
+		}
+		if _, ok := cache.get(key3); ok {
+			hits++
+		}
+		assert.Equal(t, hits, 2, "expected exactly 2 entries after eviction")
+	})
+}
+
 func TestParseAcceptHeader(t *testing.T) {
 	t.Parallel()
 

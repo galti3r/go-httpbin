@@ -332,13 +332,26 @@ public internet, consider tuning it appropriately:
 
 8. **Pipeline composable URLs**
 
-   Any endpoint can be prefixed with `delay/:duration` or
-   `response_delay/:duration` modifiers to add initial delays. The image
-   endpoint also supports path-based parameters and filename extensions.
+   Endpoints can be prefixed with modifiers to compose behavior:
+   - `delay/:duration` — initial delay before processing
+   - `response_delay/:duration` — delay before writing response
+   - `status/:code` — override the response status code
+   - `header/:name:value` — set a custom response header (X-* or allowlisted)
+
+   The `body/:base64` terminal returns base64-decoded content.
 
    ```bash
    # Delay 1 second before returning status 418
    curl http://localhost:8080/delay/1/status/418
+
+   # Override status code and return JSON
+   curl http://localhost:8080/status/422/get
+
+   # Custom headers + status override
+   curl http://localhost:8080/header/X-Custom:hello/status/201/get
+
+   # Base64-decoded body with status
+   curl http://localhost:8080/status/422/body/SGVsbG8=
 
    # Generate a ~50KB PNG image with vanity filename
    curl http://localhost:8080/image/size/small/photo.png -o photo.png
@@ -355,6 +368,39 @@ public internet, consider tuning it appropriately:
 
    All delays are bounded by `-max-duration`/`MAX_DURATION` (default 10s).
    Multiple modifiers are cumulative and their total must not exceed the limit.
+
+9. **Image gradients and caching**
+
+   Generated images support customizable gradients via query parameters or
+   pipeline path tokens:
+
+   ```bash
+   # Preset gradient
+   curl http://localhost:8080/image/png?gradient=warm&size=small -o warm.png
+
+   # Custom colors (hex RGB)
+   curl http://localhost:8080/image/png?color1=FF0000&color2=0000FF&size=medium
+
+   # Pipeline path tokens
+   curl http://localhost:8080/image/gradient/warm/size/small/photo.png
+   curl http://localhost:8080/image/no-cache/gradient/cool/photo.jpeg
+
+   # Noise control (0-255)
+   curl http://localhost:8080/image/png?gradient=sunset&noise=16&size=small
+   ```
+
+   Available presets: `default`, `warm`, `cool`, `sunset`, `forest`, `ocean`,
+   `grayscale`, `neon`.
+
+   Generated images are cached server-side with `Cache-Control` and `ETag`
+   headers. Use `?nocache=1` or the `/no-cache/` path token for unique images.
+
+10. **AVIF/WebP dynamic generation**
+
+    Dynamic image generation for AVIF and WebP formats requires external tools
+    (`avifenc`/`cwebp`/`magick`/`ffmpeg`). The Docker image includes these
+    tools. Without tools, sized AVIF/WebP requests return `501 Not Implemented`,
+    but static assets (`/image/avif`, `/image/webp`) are always available.
 
 ## Development
 

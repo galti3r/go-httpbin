@@ -1133,9 +1133,9 @@ func TestStatus(t *testing.T) {
 		url    string
 		status int
 	}{
-		{"/status", http.StatusNotFound},
-		{"/status/", http.StatusNotFound},
-		{"/status/200/foo", http.StatusNotFound},
+		{"/status", http.StatusMovedPermanently},   // Go mux redirects /status to /status/
+		{"/status/", http.StatusBadRequest},        // empty pipeline path
+		{"/status/200/foo", http.StatusBadRequest}, // status modifier + unknown terminal "foo"
 		{"/status/3.14", http.StatusBadRequest},
 		{"/status/foo", http.StatusBadRequest},
 		{"/status/600", http.StatusBadRequest},

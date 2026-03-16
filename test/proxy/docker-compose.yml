@@ -1,0 +1,18 @@
+services:
+  httpbin:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      - RATE_LIMIT_RATE=0
+    expose:
+      - "8080"
+
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    ports:
+      - "28080:80"
+    depends_on:
+      - httpbin

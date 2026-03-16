@@ -2,6 +2,7 @@ package httpbin
 
 import (
 	"bytes"
+	"context"
 	crypto_rand "crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
@@ -20,6 +21,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -474,7 +477,8 @@ func (s *syntheticByteStream) Seek(offset int64, whence int) (int64, error) {
 
 func sha1hash(input string) string {
 	h := sha1.New()
-	return fmt.Sprintf("%x", h.Sum([]byte(input)))
+	h.Write([]byte(input))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func uuidv4() string {
@@ -740,12 +744,152 @@ func parseAcceptHeader(accept string) []acceptEntry {
 	return entries
 }
 
+// gradientConfig describes how to generate a gradient image.
+type gradientConfig struct {
+	Name   string   // preset name (empty = custom)
+	Color1 [3]uint8 // RGB top-left
+	Color2 [3]uint8 // RGB bottom-right
+	Noise  int      // XOR noise amplitude (0-255)
+}
+
+// gradientPresets maps preset names to their gradient configurations.
+var gradientPresets = map[string]gradientConfig{
+	"warm":      {Name: "warm", Color1: [3]uint8{0xFF, 0x45, 0x00}, Color2: [3]uint8{0xFF, 0xD7, 0x00}, Noise: 48},
+	"cool":      {Name: "cool", Color1: [3]uint8{0x00, 0x66, 0xCC}, Color2: [3]uint8{0x00, 0xCC, 0xFF}, Noise: 48},
+	"sunset":    {Name: "sunset", Color1: [3]uint8{0xFF, 0x63, 0x47}, Color2: [3]uint8{0x4B, 0x00, 0x82}, Noise: 32},
+	"forest":    {Name: "forest", Color1: [3]uint8{0x22, 0x8B, 0x22}, Color2: [3]uint8{0x00, 0x64, 0x00}, Noise: 40},
+	"ocean":     {Name: "ocean", Color1: [3]uint8{0x00, 0x77, 0xBE}, Color2: [3]uint8{0x20, 0xB2, 0xAA}, Noise: 56},
+	"grayscale": {Name: "grayscale", Color1: [3]uint8{0x80, 0x80, 0x80}, Color2: [3]uint8{0x20, 0x20, 0x20}, Noise: 32},
+	"neon":      {Name: "neon", Color1: [3]uint8{0xFF, 0x00, 0xFF}, Color2: [3]uint8{0x00, 0xFF, 0x00}, Noise: 72},
+}
+
+// defaultGradient returns the sentinel config that reproduces the original formula.
+func defaultGradient() gradientConfig {
+	return gradientConfig{Name: "default", Noise: 64}
+}
+
+// parseHexColor parses a 6-digit hex color (with or without # prefix).
+func parseHexColor(s string) ([3]uint8, error) {
+	s = strings.TrimPrefix(s, "#")
+	if len(s) != 6 {
+		return [3]uint8{}, fmt.Errorf("invalid hex color %q: must be 6 hex digits", s)
+	}
+	var c [3]uint8
+	for i := 0; i < 3; i++ {
+		v, err := strconv.ParseUint(s[i*2:i*2+2], 16, 8)
+		if err != nil {
+			return [3]uint8{}, fmt.Errorf("invalid hex color %q: %w", s, err)
+		}
+		c[i] = uint8(v)
+	}
+	return c, nil
+}
+
+// parseGradientConfig builds a gradientConfig from query parameters.
+func parseGradientConfig(params url.Values) (gradientConfig, error) {
+	preset := params.Get("gradient")
+	c1 := params.Get("color1")
+	c2 := params.Get("color2")
+	noiseStr := params.Get("noise")
+
+	if preset != "" && (c1 != "" || c2 != "") {
+		return gradientConfig{}, fmt.Errorf("cannot combine gradient preset with color1/color2")
+	}
+
+	var grad gradientConfig
+
+	if preset != "" {
+		if preset == "default" {
+			grad = defaultGradient()
+		} else {
+			p, ok := gradientPresets[preset]
+			if !ok {
+				return gradientConfig{}, fmt.Errorf("unknown gradient preset: %q", preset)
+			}
+			grad = p
+		}
+	} else if c1 != "" || c2 != "" {
+		if c1 == "" || c2 == "" {
+			return gradientConfig{}, fmt.Errorf("both color1 and color2 are required for custom gradients")
+		}
+		var err error
+		grad.Color1, err = parseHexColor(c1)
+		if err != nil {
+			return gradientConfig{}, err
+		}
+		grad.Color2, err = parseHexColor(c2)
+		if err != nil {
+			return gradientConfig{}, err
+		}
+		grad.Noise = 64 // default noise for custom colors
+	} else {
+		grad = defaultGradient()
+	}
+
+	if noiseStr != "" {
+		n, err := strconv.Atoi(noiseStr)
+		if err != nil || n < 0 || n > 255 {
+			return gradientConfig{}, fmt.Errorf("invalid noise value %q: must be 0-255", noiseStr)
+		}
+		grad.Noise = n
+	}
+
+	return grad, nil
+}
+
+// imageCacheKey is the key for the image cache.
+type imageCacheKey struct {
+	format     string
+	targetSize int
+	grad       gradientConfig
+}
+
+// imageCache is a simple bounded cache for generated images.
+type imageCache struct {
+	mu      sync.RWMutex
+	entries map[imageCacheKey]imageCacheEntry
+	maxSize int
+}
+
+type imageCacheEntry struct {
+	data        []byte
+	contentType string
+	etag        string
+}
+
+func newImageCache(maxSize int) *imageCache {
+	return &imageCache{
+		entries: make(map[imageCacheKey]imageCacheEntry, maxSize),
+		maxSize: maxSize,
+	}
+}
+
+func (c *imageCache) get(key imageCacheKey) (imageCacheEntry, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[key]
+	return entry, ok
+}
+
+func (c *imageCache) put(key imageCacheKey, entry imageCacheEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.entries) >= c.maxSize {
+		// evict a random entry
+		for k := range c.entries {
+			delete(c.entries, k)
+			break
+		}
+	}
+	c.entries[key] = entry
+}
+
 // generateImage creates a PNG or JPEG image of approximately the target size.
 // It generates a gradient pattern with noise to reach the target byte count.
-func generateImage(format string, targetSize int) ([]byte, string, error) {
+// The seed parameter controls randomness: use 42 for deterministic output,
+// or time.Now().UnixNano() for unique images (nocache).
+func generateImage(format string, targetSize int, grad gradientConfig, seed int64) ([]byte, string, error) {
 	// Estimate dimensions needed to reach target size
-	// For PNG with noise: roughly 1 byte per pixel after compression
-	// For JPEG: roughly 0.5 bytes per pixel at quality 85
 	var pixelCount int
 	switch format {
 	case "png":
@@ -766,13 +910,30 @@ func generateImage(format string, targetSize int) ([]byte, string, error) {
 	}
 
 	img := image.NewRGBA(image.Rect(0, 0, side, side))
-	rng := rand.New(rand.NewSource(42)) // deterministic for cacheability
+	rng := rand.New(rand.NewSource(seed))
+
+	noiseAmp := grad.Noise
+	if noiseAmp < 1 {
+		noiseAmp = 1 // avoid Intn(0) panic
+	}
 
 	for y := 0; y < side; y++ {
 		for x := 0; x < side; x++ {
-			r := uint8((x * 255 / side) ^ rng.Intn(64))
-			g := uint8((y * 255 / side) ^ rng.Intn(64))
-			b := uint8(((x + y) * 127 / side) ^ rng.Intn(64))
+			var r, g, b uint8
+			if grad.Name == "default" {
+				// original formula for backward compatibility
+				r = uint8((x * 255 / side) ^ rng.Intn(noiseAmp))
+				g = uint8((y * 255 / side) ^ rng.Intn(noiseAmp))
+				b = uint8(((x + y) * 127 / side) ^ rng.Intn(noiseAmp))
+			} else {
+				// linear interpolation between Color1 and Color2
+				fx := float64(x) / float64(side)
+				fy := float64(y) / float64(side)
+				t := (fx + fy) / 2.0
+				r = uint8(float64(grad.Color1[0])*(1-t)+float64(grad.Color2[0])*t) ^ uint8(rng.Intn(noiseAmp))
+				g = uint8(float64(grad.Color1[1])*(1-t)+float64(grad.Color2[1])*t) ^ uint8(rng.Intn(noiseAmp))
+				b = uint8(float64(grad.Color1[2])*(1-t)+float64(grad.Color2[2])*t) ^ uint8(rng.Intn(noiseAmp))
+			}
 			img.SetRGBA(x, y, color.RGBA{R: r, G: g, B: b, A: 255})
 		}
 	}
@@ -793,6 +954,153 @@ func generateImage(format string, targetSize int) ([]byte, string, error) {
 	}
 
 	return buf.Bytes(), contentType, nil
+}
+
+// converterConfig describes a tool for converting PNG to another format.
+type converterConfig struct {
+	name         string   // tool name for exec.LookPath
+	args         []string // command-line arguments (PNG stdin → format stdout)
+	useTempFiles bool     // if true, use temp files instead of stdin/stdout
+}
+
+// converterToolDefs defines the conversion tools in priority order per format.
+// useTempFiles=true means the tool requires temp files instead of stdin/stdout.
+var converterToolDefs = map[string][]converterConfig{
+	"avif": {
+		{name: "avifenc", args: []string{"-s", "6", "--min", "20", "--max", "40"}, useTempFiles: true},
+		{name: "magick", args: []string{"png:-", "-quality", "50", "avif:-"}},
+		{name: "convert", args: []string{"png:-", "-quality", "50", "avif:-"}},
+		{name: "ffmpeg", args: []string{"-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-c:v", "libaom-av1", "-still-picture", "1", "-crf", "30", "-f", "avif", "pipe:1"}},
+	},
+	"webp": {
+		{name: "cwebp", args: []string{"-q", "80", "-quiet", "-o", "-", "--", "-"}},
+		{name: "magick", args: []string{"png:-", "-quality", "80", "webp:-"}},
+		{name: "convert", args: []string{"png:-", "-quality", "80", "webp:-"}},
+		{name: "ffmpeg", args: []string{"-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-c:v", "libwebp", "-quality", "80", "-f", "webp", "pipe:1"}},
+	},
+}
+
+// detectImageConverters probes the system for available conversion tools.
+func detectImageConverters() map[string]converterConfig {
+	converters := make(map[string]converterConfig)
+	for format, tools := range converterToolDefs {
+		for _, tool := range tools {
+			if _, err := execLookPath(tool.name); err == nil {
+				converters[format] = tool
+				break
+			}
+		}
+	}
+	return converters
+}
+
+// execLookPath is a variable to allow test stubbing.
+var execLookPath = execLookPathReal
+
+func execLookPathReal(name string) (string, error) {
+	return exec.LookPath(name)
+}
+
+const maxConvertOutputSize = 10 * 1024 * 1024 // 10MB
+
+// convertImageFormat converts PNG data to the target format using an external tool.
+func convertImageFormat(ctx context.Context, pngData []byte, conv converterConfig) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	if conv.useTempFiles {
+		return convertWithTempFiles(ctx, pngData, conv)
+	}
+
+	cmd := exec.CommandContext(ctx, conv.name, conv.args...)
+	cmd.Stdin = bytes.NewReader(pngData)
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("%s: failed to create stdout pipe: %w", conv.name, err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("%s: failed to start: %w", conv.name, err)
+	}
+
+	// Read stdout with a hard size limit to prevent memory exhaustion
+	limitedReader := io.LimitReader(stdoutPipe, maxConvertOutputSize+1)
+	output, readErr := io.ReadAll(limitedReader)
+
+	waitErr := cmd.Wait()
+
+	if readErr != nil {
+		return nil, fmt.Errorf("%s: read error: %w", conv.name, readErr)
+	}
+	if len(output) > maxConvertOutputSize {
+		return nil, fmt.Errorf("%s conversion output too large (>%d bytes)", conv.name, maxConvertOutputSize)
+	}
+	if waitErr != nil {
+		errMsg := stderr.String()
+		if errMsg != "" {
+			return nil, fmt.Errorf("%s conversion failed: %s: %w", conv.name, errMsg, waitErr)
+		}
+		return nil, fmt.Errorf("%s conversion failed: %w", conv.name, waitErr)
+	}
+
+	return output, nil
+}
+
+// convertWithTempFiles handles tools that require file paths (e.g. avifenc).
+func convertWithTempFiles(ctx context.Context, pngData []byte, conv converterConfig) ([]byte, error) {
+	inFile, err := os.CreateTemp("", "httpbin-*.png")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp input file: %w", err)
+	}
+	defer os.Remove(inFile.Name())
+
+	outFile, err := os.CreateTemp("", "httpbin-*.out")
+	if err != nil {
+		inFile.Close()
+		return nil, fmt.Errorf("failed to create temp output file: %w", err)
+	}
+	outFile.Close()
+	defer os.Remove(outFile.Name())
+
+	if _, err := inFile.Write(pngData); err != nil {
+		inFile.Close()
+		return nil, fmt.Errorf("failed to write temp input file: %w", err)
+	}
+	inFile.Close()
+
+	// Append input and output file paths to args
+	args := append(conv.args, inFile.Name(), "-o", outFile.Name())
+	cmd := exec.CommandContext(ctx, conv.name, args...)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		errMsg := stderr.String()
+		if errMsg != "" {
+			return nil, fmt.Errorf("%s conversion failed: %s: %w", conv.name, errMsg, err)
+		}
+		return nil, fmt.Errorf("%s conversion failed: %w", conv.name, err)
+	}
+
+	// Check output size before reading into memory
+	info, err := os.Stat(outFile.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat conversion output: %w", err)
+	}
+	if info.Size() > maxConvertOutputSize {
+		return nil, fmt.Errorf("%s conversion output too large: %d bytes (max %d)", conv.name, info.Size(), maxConvertOutputSize)
+	}
+
+	result, err := os.ReadFile(outFile.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to read conversion output: %w", err)
+	}
+
+	return result, nil
 }
 
 // parseDelayRange parses a delay value that may be a range like "2-8" or

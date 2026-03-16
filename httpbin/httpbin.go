@@ -112,6 +112,9 @@ type HTTPBin struct {
 	rateLimiter           *ipRateLimiter
 	rateLimitUseSubnets   bool
 	maxConcurrentRequests int
+
+	imgCache        *imageCache
+	imageConverters map[string]converterConfig
 }
 
 // New creates a new HTTPBin instance
@@ -137,6 +140,9 @@ func New(opts ...OptionFunc) *HTTPBin {
 	var buf bytes.Buffer
 	writeServerSentEvent(&buf, 999, time.Now(), "")
 	h.maxSSECount = h.MaxBodySize / int64(buf.Len())
+
+	h.imgCache = newImageCache(256)
+	h.imageConverters = detectImageConverters()
 
 	h.handler = h.Handler()
 	return h
@@ -244,6 +250,9 @@ func (h *HTTPBin) Handler() http.Handler {
 	mux.HandleFunc("/redirect/", h.Pipeline)
 	mux.HandleFunc("/absolute-redirect/", h.Pipeline)
 	mux.HandleFunc("/relative-redirect/", h.Pipeline)
+	mux.HandleFunc("/status/", h.Pipeline)
+	mux.HandleFunc("/header/", h.Pipeline)
+	mux.HandleFunc("/body/", h.Pipeline)
 
 	// existing httpbin endpoints that we do not support
 	mux.HandleFunc("/brotli", notImplementedHandler)
