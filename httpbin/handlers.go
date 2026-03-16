@@ -1197,7 +1197,7 @@ func (h *HTTPBin) Image(w http.ResponseWriter, r *http.Request) {
 			if nocache {
 				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			} else {
-				etag := fmt.Sprintf(`"%s"`, sha1hash(string(data)))
+				etag := fmt.Sprintf(`"%s"`, sha1hashBytes(data))
 				h.imgCache.put(cacheKey, imageCacheEntry{data: data, contentType: contentType, etag: etag})
 				w.Header().Set("Cache-Control", "public, max-age=86400")
 				w.Header().Set("ETag", etag)
@@ -1565,9 +1565,67 @@ func (h *HTTPBin) Version(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// PDF returns a simple PDF document.
-func (h *HTTPBin) PDF(w http.ResponseWriter, _ *http.Request) {
-	writeResponse(w, http.StatusOK, "application/pdf", mustStaticAsset("sample.pdf"))
+// PDF returns a dynamically generated PDF document.
+// Supports query parameters: pages (1-100), size (small/medium/large), seed (int), nocache (1).
+func (h *HTTPBin) PDF(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	pages := 1
+	if rawPages := q.Get("pages"); rawPages != "" {
+		var err error
+		pages, err = strconv.Atoi(rawPages)
+		if err != nil || pages < 1 || pages > 100 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid pages value %q: must be 1-100", rawPages))
+			return
+		}
+	}
+
+	size := "medium"
+	if rawSize := q.Get("size"); rawSize != "" {
+		switch rawSize {
+		case "small", "medium", "large":
+			size = rawSize
+		default:
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid size %q: must be small, medium, or large", rawSize))
+			return
+		}
+	}
+
+	nocache := q.Get("nocache") == "1"
+
+	var seed int64 = 42
+	if nocache {
+		seed = time.Now().UnixNano()
+	} else if rawSeed := q.Get("seed"); rawSeed != "" {
+		var err error
+		seed, err = parseSeedInt64(rawSeed)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid seed %q: %w", rawSeed, err))
+			return
+		}
+	}
+
+	cacheKey := pdfCacheKey{pages: pages, size: size, seed: seed}
+
+	// Check cache for deterministic requests
+	if !nocache {
+		if entry, ok := h.pdfCache.get(cacheKey); ok {
+			writeResponse(w, http.StatusOK, "application/pdf", entry.data)
+			return
+		}
+	}
+
+	data, err := generatePDF(pages, size, seed)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	if !nocache {
+		h.pdfCache.put(cacheKey, pdfCacheEntry{data: data})
+	}
+
+	writeResponse(w, http.StatusOK, "application/pdf", data)
 }
 
 // ProblemDetails returns a Problem Details (RFC 9457) JSON response.
@@ -1582,6 +1640,8 @@ func (h *HTTPBin) ProblemDetails(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+	} else if ow, ok := w.(interface{ StatusOverride() int }); ok {
+		status = ow.StatusOverride()
 	}
 
 	resp := &problemDetailResponse{

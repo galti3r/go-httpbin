@@ -113,8 +113,10 @@ type HTTPBin struct {
 	rateLimitUseSubnets   bool
 	maxConcurrentRequests int
 
-	imgCache        *imageCache
-	imageConverters map[string]converterConfig
+	imgCache         *imageCache
+	imageConverters  map[string]converterConfig
+	pdfCache         *pdfCache
+	terminalHandlers map[string]http.HandlerFunc
 }
 
 // New creates a new HTTPBin instance
@@ -141,8 +143,10 @@ func New(opts ...OptionFunc) *HTTPBin {
 	writeServerSentEvent(&buf, 999, time.Now(), "")
 	h.maxSSECount = h.MaxBodySize / int64(buf.Len())
 
-	h.imgCache = newImageCache(256)
+	h.imgCache = newImageCache(64) // ~64 * 2MB = 128MB worst case
 	h.imageConverters = detectImageConverters()
+	h.pdfCache = newPDFCache(64)
+	h.terminalHandlers = h.buildTerminalHandlers()
 
 	h.handler = h.Handler()
 	return h

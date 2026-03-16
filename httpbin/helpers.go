@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/color"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -372,21 +371,21 @@ func parseBoundedDuration(input string, minVal, maxVal time.Duration) (time.Dura
 }
 
 // Returns a new rand.Rand from the given seed string.
-func parseSeed(rawSeed string) (*rand.Rand, error) {
-	var seed int64
-	if rawSeed != "" {
-		var err error
-		seed, err = strconv.ParseInt(rawSeed, 10, 64)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		seed = time.Now().UnixNano()
+// parseSeedInt64 parses a seed string into an int64. If rawSeed is empty,
+// returns time.Now().UnixNano() for non-deterministic output.
+func parseSeedInt64(rawSeed string) (int64, error) {
+	if rawSeed == "" {
+		return time.Now().UnixNano(), nil
 	}
+	return strconv.ParseInt(rawSeed, 10, 64)
+}
 
-	src := rand.NewSource(seed)
-	rng := rand.New(src)
-	return rng, nil
+func parseSeed(rawSeed string) (*rand.Rand, error) {
+	seed, err := parseSeedInt64(rawSeed)
+	if err != nil {
+		return nil, err
+	}
+	return rand.New(rand.NewSource(seed)), nil
 }
 
 func computePausePerWrite(duration time.Duration, count int64) time.Duration {
@@ -476,8 +475,12 @@ func (s *syntheticByteStream) Seek(offset int64, whence int) (int64, error) {
 }
 
 func sha1hash(input string) string {
+	return sha1hashBytes([]byte(input))
+}
+
+func sha1hashBytes(input []byte) string {
 	h := sha1.New()
-	h.Write([]byte(input))
+	h.Write(input)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
@@ -545,11 +548,22 @@ func (b *base64Helper) encode() []byte {
 }
 
 func (b *base64Helper) decode() ([]byte, error) {
-	// first, try URL-safe encoding, then std encoding
-	if result, err := base64.URLEncoding.DecodeString(b.data); err == nil {
+	return decodeBase64Flexible(b.data)
+}
+
+// decodeBase64Flexible tries multiple base64 encodings in order:
+// URL-safe padded, URL-safe raw, standard padded, standard raw.
+func decodeBase64Flexible(data string) ([]byte, error) {
+	if result, err := base64.URLEncoding.DecodeString(data); err == nil {
 		return result, nil
 	}
-	return base64.StdEncoding.DecodeString(b.data)
+	if result, err := base64.RawURLEncoding.DecodeString(data); err == nil {
+		return result, nil
+	}
+	if result, err := base64.StdEncoding.DecodeString(data); err == nil {
+		return result, nil
+	}
+	return base64.RawStdEncoding.DecodeString(data)
 }
 
 func wildCardToRegexp(pattern string) string {
@@ -694,6 +708,7 @@ func encodeServerTimings(timings []serverTiming) string {
 var safeContentTypes = map[string]bool{
 	"text/plain":               true,
 	"application/json":         true,
+	"application/problem+json": true,
 	"application/octet-string": true,
 }
 
@@ -837,18 +852,44 @@ func parseGradientConfig(params url.Values) (gradientConfig, error) {
 	return grad, nil
 }
 
+// boundedCache is a simple bounded cache with random eviction.
+type boundedCache[K comparable, V any] struct {
+	mu      sync.RWMutex
+	entries map[K]V
+	maxSize int
+}
+
+func newBoundedCache[K comparable, V any](maxSize int) *boundedCache[K, V] {
+	return &boundedCache[K, V]{
+		entries: make(map[K]V, maxSize),
+		maxSize: maxSize,
+	}
+}
+
+func (c *boundedCache[K, V]) get(key K) (V, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[key]
+	return entry, ok
+}
+
+func (c *boundedCache[K, V]) put(key K, entry V) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.entries) >= c.maxSize {
+		for k := range c.entries {
+			delete(c.entries, k)
+			break
+		}
+	}
+	c.entries[key] = entry
+}
+
 // imageCacheKey is the key for the image cache.
 type imageCacheKey struct {
 	format     string
 	targetSize int
 	grad       gradientConfig
-}
-
-// imageCache is a simple bounded cache for generated images.
-type imageCache struct {
-	mu      sync.RWMutex
-	entries map[imageCacheKey]imageCacheEntry
-	maxSize int
 }
 
 type imageCacheEntry struct {
@@ -857,31 +898,10 @@ type imageCacheEntry struct {
 	etag        string
 }
 
+type imageCache = boundedCache[imageCacheKey, imageCacheEntry]
+
 func newImageCache(maxSize int) *imageCache {
-	return &imageCache{
-		entries: make(map[imageCacheKey]imageCacheEntry, maxSize),
-		maxSize: maxSize,
-	}
-}
-
-func (c *imageCache) get(key imageCacheKey) (imageCacheEntry, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	entry, ok := c.entries[key]
-	return entry, ok
-}
-
-func (c *imageCache) put(key imageCacheKey, entry imageCacheEntry) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.entries) >= c.maxSize {
-		// evict a random entry
-		for k := range c.entries {
-			delete(c.entries, k)
-			break
-		}
-	}
-	c.entries[key] = entry
+	return newBoundedCache[imageCacheKey, imageCacheEntry](maxSize)
 }
 
 // generateImage creates a PNG or JPEG image of approximately the target size.
@@ -910,6 +930,8 @@ func generateImage(format string, targetSize int, grad gradientConfig, seed int6
 	}
 
 	img := image.NewRGBA(image.Rect(0, 0, side, side))
+	pix := img.Pix
+	stride := img.Stride
 	rng := rand.New(rand.NewSource(seed))
 
 	noiseAmp := grad.Noise
@@ -917,10 +939,13 @@ func generateImage(format string, targetSize int, grad gradientConfig, seed int6
 		noiseAmp = 1 // avoid Intn(0) panic
 	}
 
+	useDefaultGrad := grad.Name == "default"
+
 	for y := 0; y < side; y++ {
+		rowOff := y * stride
 		for x := 0; x < side; x++ {
 			var r, g, b uint8
-			if grad.Name == "default" {
+			if useDefaultGrad {
 				// original formula for backward compatibility
 				r = uint8((x * 255 / side) ^ rng.Intn(noiseAmp))
 				g = uint8((y * 255 / side) ^ rng.Intn(noiseAmp))
@@ -934,11 +959,16 @@ func generateImage(format string, targetSize int, grad gradientConfig, seed int6
 				g = uint8(float64(grad.Color1[1])*(1-t)+float64(grad.Color2[1])*t) ^ uint8(rng.Intn(noiseAmp))
 				b = uint8(float64(grad.Color1[2])*(1-t)+float64(grad.Color2[2])*t) ^ uint8(rng.Intn(noiseAmp))
 			}
-			img.SetRGBA(x, y, color.RGBA{R: r, G: g, B: b, A: 255})
+			off := rowOff + x*4
+			pix[off] = r
+			pix[off+1] = g
+			pix[off+2] = b
+			pix[off+3] = 255
 		}
 	}
 
 	var buf bytes.Buffer
+	buf.Grow(targetSize)
 	var contentType string
 	switch format {
 	case "png":
@@ -1071,8 +1101,10 @@ func convertWithTempFiles(ctx context.Context, pngData []byte, conv converterCon
 	}
 	inFile.Close()
 
-	// Append input and output file paths to args
-	args := append(conv.args, inFile.Name(), "-o", outFile.Name())
+	// Copy args to avoid mutating shared slice, then append file paths
+	args := make([]string, len(conv.args), len(conv.args)+3)
+	copy(args, conv.args)
+	args = append(args, inFile.Name(), "-o", outFile.Name())
 	cmd := exec.CommandContext(ctx, conv.name, args...)
 
 	var stderr bytes.Buffer
@@ -1101,6 +1133,232 @@ func convertWithTempFiles(ctx context.Context, pngData []byte, conv converterCon
 	}
 
 	return result, nil
+}
+
+// pdfCacheKey is the key for the PDF cache.
+type pdfCacheKey struct {
+	pages int
+	size  string
+	seed  int64
+}
+
+// pdfCacheEntry holds cached PDF data.
+type pdfCacheEntry struct {
+	data []byte
+}
+
+type pdfCache = boundedCache[pdfCacheKey, pdfCacheEntry]
+
+func newPDFCache(maxSize int) *pdfCache {
+	return newBoundedCache[pdfCacheKey, pdfCacheEntry](maxSize)
+}
+
+// loremPhrases provides text content for PDF generation.
+var loremPhrases = []string{
+	"Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+	"Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+	"Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.",
+	"Duis aute irure dolor in reprehenderit in voluptate velit esse cillum.",
+	"Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia.",
+	"Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit.",
+	"Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet.",
+	"Consectetur, adipisci velit, sed quia non numquam eius modi tempora incidunt.",
+	"Ut labore et dolore magnam aliquam quaerat voluptatem.",
+	"Quis autem vel eum iure reprehenderit qui in ea voluptate velit esse.",
+	"At vero eos et accusamus et iusto odio dignissimos ducimus.",
+	"Nam libero tempore, cum soluta nobis est eligendi optio cumque nihil impedit.",
+	"Temporibus autem quibusdam et aut officiis debitis aut rerum necessitatibus.",
+	"Itaque earum rerum hic tenetur a sapiente delectus.",
+	"Ut aut reiciendis voluptatibus maiores alias consequatur aut perferendis.",
+}
+
+// generatePDF creates a valid PDF 1.4 document with the given parameters.
+// It uses raw PDF operators for text and graphics (stdlib only, no external deps).
+func generatePDF(pages int, size string, seed int64) ([]byte, error) {
+	rng := rand.New(rand.NewSource(seed))
+
+	// Determine content density based on size
+	var paragraphs, images int
+	switch size {
+	case "small":
+		paragraphs = 2
+		images = 0
+	case "large":
+		paragraphs = 9
+		images = 3
+	default: // medium
+		paragraphs = 5
+		images = 1
+	}
+
+	var buf bytes.Buffer
+	offsets := make([]int, 0, pages*3+10)
+
+	// Track object numbers: 1=catalog, 2=pages, 3=font
+	// Then for each page: pageObj, contentsObj
+	nextObj := 4
+
+	// Header
+	buf.WriteString("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")
+
+	// Object 1: Catalog
+	offsets = append(offsets, buf.Len())
+	buf.WriteString("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+
+	// Build page object references
+	pageObjNums := make([]int, pages)
+	for i := 0; i < pages; i++ {
+		pageObjNums[i] = nextObj
+		nextObj += 2 // page + contents
+	}
+
+	// Object 2: Pages
+	offsets = append(offsets, buf.Len())
+	buf.WriteString("2 0 obj\n<< /Type /Pages /Kids [")
+	for i, pn := range pageObjNums {
+		if i > 0 {
+			buf.WriteByte(' ')
+		}
+		fmt.Fprintf(&buf, "%d 0 R", pn)
+	}
+	fmt.Fprintf(&buf, "] /Count %d >>\nendobj\n", pages)
+
+	// Object 3: Font (Helvetica built-in)
+	offsets = append(offsets, buf.Len())
+	buf.WriteString("3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+
+	// Reusable per-page content buffer
+	var content bytes.Buffer
+
+	// pdfTextLine writes "BT /F1 {ptSize} Tf 50 {y} Td ({text}) Tj ET\n" efficiently.
+	pdfTextLine := func(c *bytes.Buffer, ptSize int, y float64, text string) {
+		c.WriteString("BT /F1 ")
+		c.WriteString(strconv.Itoa(ptSize))
+		c.WriteString(" Tf 50 ")
+		c.WriteString(strconv.FormatFloat(y, 'f', 0, 64))
+		c.WriteString(" Td (")
+		c.WriteString(pdfEscapeString(text))
+		c.WriteString(") Tj ET\n")
+	}
+
+	// Generate pages
+	for p := 0; p < pages; p++ {
+		// Build page content stream
+		content.Reset()
+
+		y := 760.0 // start from top, A4 = 595x842
+
+		// Title: "Page N of M"
+		title := "Page " + strconv.Itoa(p+1) + " of " + strconv.Itoa(pages)
+		pdfTextLine(&content, 18, y, title)
+		y -= 30
+
+		// Horizontal line
+		yStr := strconv.FormatFloat(y, 'f', 0, 64)
+		content.WriteString("0.5 w 50 ")
+		content.WriteString(yStr)
+		content.WriteString(" m 545 ")
+		content.WriteString(yStr)
+		content.WriteString(" l S\n")
+		y -= 20
+
+		// Paragraphs
+		for para := 0; para < paragraphs && y > 80; para++ {
+			text := loremPhrases[rng.Intn(len(loremPhrases))]
+			pdfTextLine(&content, 10, y, text)
+			y -= 16
+
+			// Add a second line for some paragraphs
+			if para%2 == 0 && y > 80 {
+				text2 := loremPhrases[rng.Intn(len(loremPhrases))]
+				pdfTextLine(&content, 10, y, text2)
+				y -= 16
+			}
+
+			y -= 8 // paragraph spacing
+		}
+
+		// Colored rectangles (inline images)
+		for img := 0; img < images && y > 100; img++ {
+			r := float64(rng.Intn(256)) / 255.0
+			g := float64(rng.Intn(256)) / 255.0
+			b := float64(rng.Intn(256)) / 255.0
+			w := 80.0 + float64(rng.Intn(120))
+			h := 30.0 + float64(rng.Intn(30))
+
+			xPos := 50.0 + float64(img)*180.0
+			content.WriteString(strconv.FormatFloat(r, 'f', 3, 64))
+			content.WriteByte(' ')
+			content.WriteString(strconv.FormatFloat(g, 'f', 3, 64))
+			content.WriteByte(' ')
+			content.WriteString(strconv.FormatFloat(b, 'f', 3, 64))
+			content.WriteString(" rg ")
+			content.WriteString(strconv.FormatFloat(xPos, 'f', 0, 64))
+			content.WriteByte(' ')
+			content.WriteString(strconv.FormatFloat(y-h, 'f', 0, 64))
+			content.WriteByte(' ')
+			content.WriteString(strconv.FormatFloat(w, 'f', 0, 64))
+			content.WriteByte(' ')
+			content.WriteString(strconv.FormatFloat(h, 'f', 0, 64))
+			content.WriteString(" re f\n")
+			y -= h + 10
+		}
+
+		// Footer: seed info
+		pdfTextLine(&content, 8, 30, "seed="+strconv.FormatInt(seed, 10)+"  size="+size)
+
+		contentBytes := content.Bytes()
+
+		// Page content stream object
+		contentsObjNum := pageObjNums[p] + 1
+		offsets = append(offsets, buf.Len())
+		buf.WriteString(strconv.Itoa(pageObjNums[p]))
+		buf.WriteString(" 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents ")
+		buf.WriteString(strconv.Itoa(contentsObjNum))
+		buf.WriteString(" 0 R /Resources << /Font << /F1 3 0 R >> >> >>\nendobj\n")
+
+		// Contents stream object
+		offsets = append(offsets, buf.Len())
+		buf.WriteString(strconv.Itoa(contentsObjNum))
+		buf.WriteString(" 0 obj\n<< /Length ")
+		buf.WriteString(strconv.Itoa(len(contentBytes)))
+		buf.WriteString(" >>\nstream\n")
+		buf.Write(contentBytes)
+		buf.WriteString("\nendstream\nendobj\n")
+	}
+
+	// Cross-reference table
+	xrefOffset := buf.Len()
+	buf.WriteString("xref\n0 ")
+	buf.WriteString(strconv.Itoa(len(offsets) + 1))
+	buf.WriteString("\n0000000000 65535 f \n")
+	var xrefEntry [21]byte // "0000000000 00000 n \n" = 20 chars + null
+	copy(xrefEntry[:], "0000000000 00000 n \n")
+	for _, off := range offsets {
+		s := strconv.Itoa(off)
+		// Zero-pad to 10 digits
+		for i := range 10 {
+			xrefEntry[i] = '0'
+		}
+		copy(xrefEntry[10-len(s):], s)
+		buf.Write(xrefEntry[:20])
+	}
+
+	// Trailer
+	buf.WriteString("trailer\n<< /Size ")
+	buf.WriteString(strconv.Itoa(len(offsets) + 1))
+	buf.WriteString(" /Root 1 0 R >>\nstartxref\n")
+	buf.WriteString(strconv.Itoa(xrefOffset))
+	buf.WriteString("\n%%EOF\n")
+
+	return buf.Bytes(), nil
+}
+
+// pdfStringReplacer escapes special characters for PDF string literals.
+var pdfStringReplacer = strings.NewReplacer(`\`, `\\`, `(`, `\(`, `)`, `\)`)
+
+func pdfEscapeString(s string) string {
+	return pdfStringReplacer.Replace(s)
 }
 
 // parseDelayRange parses a delay value that may be a range like "2-8" or

@@ -22,6 +22,9 @@ import (
 	"github.com/galti3r/go-httpbin/v3/httpbin"
 )
 
+// Version is set at build time via ldflags.
+var Version string
+
 const (
 	defaultListenHost = "0.0.0.0"
 	defaultListenPort = 8080
@@ -89,6 +92,7 @@ func mainImpl(args []string, getEnvVal func(string) string, getEnviron func() []
 		httpbin.WithMaxDuration(cfg.MaxDuration),
 		httpbin.WithObserver(httpbin.StdLogObserver(logger)),
 		httpbin.WithExcludeHeaders(cfg.ExcludeHeaders),
+		httpbin.WithVersion(Version),
 	}
 	if cfg.Prefix != "" {
 		opts = append(opts, httpbin.WithPrefix(cfg.Prefix))

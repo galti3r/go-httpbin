@@ -16,6 +16,35 @@ import (
 	"github.com/galti3r/go-httpbin/v3/internal/testing/must"
 )
 
+// assertPipelineResult verifies that a parsePipeline result matches expectations.
+func assertPipelineResult(t *testing.T, result *pipelineResult, wantModifiers []pipelineStep, wantTerminal pipelineStep) {
+	t.Helper()
+	if len(result.modifiers) != len(wantModifiers) {
+		t.Fatalf("modifier count: want %d, got %d", len(wantModifiers), len(result.modifiers))
+	}
+	for i, want := range wantModifiers {
+		got := result.modifiers[i]
+		if got.name != want.name {
+			t.Errorf("modifier[%d].name: want %q, got %q", i, want.name, got.name)
+		}
+		if len(got.args) != len(want.args) {
+			t.Errorf("modifier[%d].args: want %v, got %v", i, want.args, got.args)
+		}
+	}
+	if result.terminal.name != wantTerminal.name {
+		t.Errorf("terminal.name: want %q, got %q", wantTerminal.name, result.terminal.name)
+	}
+	if len(result.terminal.args) != len(wantTerminal.args) {
+		t.Errorf("terminal.args: want %v, got %v", wantTerminal.args, result.terminal.args)
+	} else {
+		for i, want := range wantTerminal.args {
+			if result.terminal.args[i] != want {
+				t.Errorf("terminal.args[%d]: want %q, got %q", i, want, result.terminal.args[i])
+			}
+		}
+	}
+}
+
 func TestParsePipeline(t *testing.T) {
 	t.Parallel()
 
@@ -177,34 +206,7 @@ func TestParsePipeline(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-
-			// Check modifiers
-			if len(result.modifiers) != len(tt.modifiers) {
-				t.Fatalf("modifier count: want %d, got %d", len(tt.modifiers), len(result.modifiers))
-			}
-			for i, want := range tt.modifiers {
-				got := result.modifiers[i]
-				if got.name != want.name {
-					t.Errorf("modifier[%d].name: want %q, got %q", i, want.name, got.name)
-				}
-				if len(got.args) != len(want.args) {
-					t.Errorf("modifier[%d].args: want %v, got %v", i, want.args, got.args)
-				}
-			}
-
-			// Check terminal
-			if result.terminal.name != tt.terminal.name {
-				t.Errorf("terminal.name: want %q, got %q", tt.terminal.name, result.terminal.name)
-			}
-			if len(result.terminal.args) != len(tt.terminal.args) {
-				t.Errorf("terminal.args: want %v, got %v", tt.terminal.args, result.terminal.args)
-			} else {
-				for i, want := range tt.terminal.args {
-					if result.terminal.args[i] != want {
-						t.Errorf("terminal.args[%d]: want %q, got %q", i, want, result.terminal.args[i])
-					}
-				}
-			}
+			assertPipelineResult(t, result, tt.modifiers, tt.terminal)
 		})
 	}
 }
@@ -1497,4 +1499,729 @@ func BenchmarkCachedGenerateImage(b *testing.B) {
 			cache.get(key)
 		}
 	})
+}
+
+// Tests for new pipeline terminals (Part 3)
+func TestParsePipelineNewTerminals(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		input     string
+		modifiers []pipelineStep
+		terminal  pipelineStep
+		wantErr   bool
+	}{
+		{
+			name:      "delay+version",
+			input:     "/delay/0/version",
+			modifiers: []pipelineStep{{name: "delay", args: []string{"0"}}},
+			terminal:  pipelineStep{name: "version", args: nil},
+		},
+		{
+			name:      "status+problem",
+			input:     "/status/422/problem",
+			modifiers: []pipelineStep{{name: "status", args: []string{"422"}}},
+			terminal:  pipelineStep{name: "problem", args: nil},
+		},
+		{
+			name:      "delay+echo",
+			input:     "/delay/0/echo",
+			modifiers: []pipelineStep{{name: "delay", args: []string{"0"}}},
+			terminal:  pipelineStep{name: "echo", args: nil},
+		},
+		{
+			name:      "delay+close",
+			input:     "/delay/0/close",
+			modifiers: []pipelineStep{{name: "delay", args: []string{"0"}}},
+			terminal:  pipelineStep{name: "close", args: nil},
+		},
+		{
+			name:      "delay+upload",
+			input:     "/delay/0/upload",
+			modifiers: []pipelineStep{{name: "delay", args: []string{"0"}}},
+			terminal:  pipelineStep{name: "upload", args: nil},
+		},
+		{
+			name:      "delay+negotiate",
+			input:     "/delay/0/negotiate",
+			modifiers: []pipelineStep{{name: "delay", args: []string{"0"}}},
+			terminal:  pipelineStep{name: "negotiate", args: nil},
+		},
+		{
+			name:      "delay+redirect-to",
+			input:     "/delay/0/redirect-to",
+			modifiers: []pipelineStep{{name: "delay", args: []string{"0"}}},
+			terminal:  pipelineStep{name: "redirect-to", args: nil},
+		},
+		{
+			name:      "delay+response-headers",
+			input:     "/delay/0/response-headers",
+			modifiers: []pipelineStep{{name: "delay", args: []string{"0"}}},
+			terminal:  pipelineStep{name: "response-headers", args: nil},
+		},
+		{
+			name:  "header+status+problem",
+			input: "/header/X-Test:val/status/422/problem",
+			modifiers: []pipelineStep{
+				{name: "header", args: []string{"X-Test:val"}},
+				{name: "status", args: []string{"422"}},
+			},
+			terminal: pipelineStep{name: "problem", args: nil},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result, err := parsePipeline(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got result: %+v", result)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			assertPipelineResult(t, result, tt.modifiers, tt.terminal)
+		})
+	}
+}
+
+func TestPipelineNewTerminalsE2E(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t, WithVersion("test-v1"), WithMaxDuration(10*time.Second))
+
+	// version terminal
+	t.Run("version/delay", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/version"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.BodyContains(t, resp, "test-v1")
+	})
+	t.Run("version/status_201", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/status/201/version"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 201)
+	})
+	t.Run("version/header", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/header/X-Req-Id:abc/version"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.Header(t, resp, "X-Req-Id", "abc")
+	})
+	t.Run("version/combo", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/header/X-Test:1/status/201/version"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 201)
+		assert.Header(t, resp, "X-Test", "1")
+	})
+
+	// problem terminal
+	t.Run("problem/delay_default", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/problem"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, problemContentType)
+		body := must.ReadAll(t, resp.Body)
+		assert.Contains(t, body, `"type"`, "body")
+		assert.Contains(t, body, `"about:blank"`, "body")
+	})
+	t.Run("problem/with_title", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/problem?title=Test"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.BodyContains(t, resp, "Test")
+	})
+	t.Run("problem/status_query_422", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/problem?status=422"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 422)
+		assert.BodyContains(t, resp, `"status": 422`)
+	})
+	t.Run("problem/status_modifier_422", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/status/422/problem?title=Test"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 422)
+		assert.BodyContains(t, resp, `"status": 422`)
+	})
+	t.Run("problem/status500_query422", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/status/500/problem?status=422"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 500)
+		assert.BodyContains(t, resp, `"status": 422`)
+	})
+	t.Run("problem/header", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/header/X-Problem:yes/problem"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.Header(t, resp, "X-Problem", "yes")
+	})
+	t.Run("problem/invalid_status_999", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/problem?status=999"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+	t.Run("problem/defaults", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/problem"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		body := must.ReadAll(t, resp.Body)
+		assert.Contains(t, body, `"about:blank"`, "body")
+		assert.Contains(t, body, `"OK"`, "body")
+	})
+
+	// negotiate terminal
+	t.Run("negotiate/delay_default", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/negotiate"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+	t.Run("negotiate/accept_html", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/negotiate"), nil)
+		req.Header.Set("Accept", "text/html")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.BodyContains(t, resp, "text/html")
+	})
+	t.Run("negotiate/accept_tiff_406", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/negotiate"), nil)
+		req.Header.Set("Accept", "image/tiff")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusNotAcceptable)
+	})
+	t.Run("negotiate/status_201", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/status/201/negotiate"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 201)
+	})
+	t.Run("negotiate/post_allowed", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/delay/0/negotiate"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+
+	// echo terminal
+	t.Run("echo/post", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/delay/0/echo"), strings.NewReader("hello"))
+		req.Header.Set("Content-Type", "text/plain")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.BodyContains(t, resp, "hello")
+	})
+	t.Run("echo/put", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "PUT", app.URL("/delay/0/echo"), strings.NewReader("data"))
+		req.Header.Set("Content-Type", "text/plain")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+	t.Run("echo/patch", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "PATCH", app.URL("/delay/0/echo"), strings.NewReader("data"))
+		req.Header.Set("Content-Type", "text/plain")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+	t.Run("echo/get_405", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/echo"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusMethodNotAllowed)
+	})
+	t.Run("echo/delete_405", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "DELETE", app.URL("/delay/0/echo"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusMethodNotAllowed)
+	})
+	t.Run("echo/status_201", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/status/201/echo"), strings.NewReader("hello"))
+		req.Header.Set("Content-Type", "text/plain")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 201)
+	})
+	t.Run("echo/header", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/header/X-Echo:yes/echo"), strings.NewReader("hello"))
+		req.Header.Set("Content-Type", "text/plain")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.Header(t, resp, "X-Echo", "yes")
+	})
+
+	// redirect-to terminal
+	t.Run("redirect-to/delay", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/redirect-to?url=/get"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusFound)
+	})
+	t.Run("redirect-to/custom_status", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/redirect-to?url=/get&status_code=301"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 301)
+	})
+	t.Run("redirect-to/missing_url_400", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/redirect-to"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	// response-headers terminal
+	t.Run("response-headers/delay", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/response-headers?X-Test=hello"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.Header(t, resp, "X-Test", "hello")
+	})
+	t.Run("response-headers/multi", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/response-headers?X-A=1&X-B=2"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.Header(t, resp, "X-A", "1")
+		assert.Header(t, resp, "X-B", "2")
+	})
+	t.Run("response-headers/status_201", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/status/201/response-headers?X-Test=hello"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 201)
+	})
+
+	// upload terminal
+	t.Run("upload/post", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/delay/0/upload"), strings.NewReader("upload data"))
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.BodyContains(t, resp, "bytes_received")
+	})
+	t.Run("upload/put", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "PUT", app.URL("/delay/0/upload"), strings.NewReader("upload data"))
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+	t.Run("upload/patch", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "PATCH", app.URL("/delay/0/upload"), strings.NewReader("upload data"))
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+	t.Run("upload/get_405", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/upload"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusMethodNotAllowed)
+	})
+	t.Run("upload/status_201", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/status/201/upload"), strings.NewReader("data"))
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 201)
+	})
+
+	// PDF via pipeline
+	t.Run("pdf/status_201", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/status/201/pdf"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 201)
+	})
+	t.Run("pdf/delay_pages3", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/pdf?pages=3"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "application/pdf")
+	})
+	t.Run("pdf/header", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/header/X-PDF:yes/pdf"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.Header(t, resp, "X-PDF", "yes")
+	})
+
+	// Method refactor regression
+	t.Run("regression/post_get_405", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/delay/0/get"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusMethodNotAllowed)
+	})
+	t.Run("regression/post_encoding_405", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/delay/0/encoding/utf8"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusMethodNotAllowed)
+	})
+}
+
+// Backward compat for new terminals
+func TestPipelineNewTerminalsBackwardCompat(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t, WithVersion("compat-test"))
+
+	compatTests := []struct {
+		name   string
+		url    string
+		method string
+		status int
+	}{
+		{"version", "/version", "GET", http.StatusOK},
+		{"problem", "/problem", "GET", http.StatusOK},
+		{"negotiate", "/negotiate", "GET", http.StatusOK},
+		{"echo_post", "/echo", "POST", http.StatusOK},
+		{"response-headers", "/response-headers?X-Test=1", "GET", http.StatusOK},
+		{"pdf", "/pdf", "GET", http.StatusOK},
+	}
+	for _, tt := range compatTests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var body io.Reader
+			if tt.method == "POST" {
+				body = strings.NewReader("test")
+			}
+			req := newTestRequest(t, tt.method, app.URL(tt.url), body)
+			if tt.method == "POST" {
+				req.Header.Set("Content-Type", "text/plain")
+			}
+			resp := mustDoRequest(t, app, req)
+			assert.StatusCode(t, resp, tt.status)
+		})
+	}
+}
+
+// Terminal table: new entries
+func TestPipelineTerminalTableNewEntries(t *testing.T) {
+	t.Parallel()
+
+	newTerminals := []string{
+		"version", "problem", "negotiate", "echo",
+		"redirect-to", "response-headers", "close", "upload",
+	}
+
+	for _, name := range newTerminals {
+		if _, ok := pipelineTerminals[name]; !ok {
+			t.Errorf("expected terminal %q not found in pipelineTerminals", name)
+		}
+	}
+}
+
+// Prefix tests for new terminals
+func TestPipelineNewTerminalsWithPrefix(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t, WithPrefix("/api"), WithVersion("prefix-test"), WithMaxDuration(10*time.Second))
+
+	t.Run("version", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/api/delay/0/version"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.BodyContains(t, resp, "prefix-test")
+	})
+	t.Run("problem_422", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/api/status/422/problem"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 422)
+	})
+	t.Run("echo_post", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/api/delay/0/echo"), strings.NewReader("test"))
+		req.Header.Set("Content-Type", "text/plain")
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+	t.Run("upload_post", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/api/delay/0/upload"), strings.NewReader("data"))
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+}
+
+// PDF dynamic tests
+func TestPDFDynamic(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	t.Run("default", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/pdf"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "application/pdf")
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.HasPrefix(string(body), "%PDF-") {
+			t.Fatal("expected PDF magic header")
+		}
+	})
+
+	t.Run("pages_3", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/pdf?pages=3"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "Page 3 of 3") {
+			t.Fatal("expected 3 pages")
+		}
+	})
+
+	t.Run("size_small", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/pdf?size=small"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		smallBody, _ := io.ReadAll(resp.Body)
+
+		req2 := newTestRequest(t, "GET", app.URL("/pdf?size=large"), nil)
+		resp2 := mustDoRequest(t, app, req2)
+		largeBody, _ := io.ReadAll(resp2.Body)
+
+		if len(largeBody) <= len(smallBody) {
+			t.Fatalf("expected large (%d) > small (%d)", len(largeBody), len(smallBody))
+		}
+	})
+
+	t.Run("seed_determinism", func(t *testing.T) {
+		t.Parallel()
+		req1 := newTestRequest(t, "GET", app.URL("/pdf?seed=123"), nil)
+		resp1 := mustDoRequest(t, app, req1)
+		body1, _ := io.ReadAll(resp1.Body)
+
+		req2 := newTestRequest(t, "GET", app.URL("/pdf?seed=123"), nil)
+		resp2 := mustDoRequest(t, app, req2)
+		body2, _ := io.ReadAll(resp2.Body)
+
+		if !bytes.Equal(body1, body2) {
+			t.Fatal("same seed should produce identical PDF")
+		}
+	})
+
+	t.Run("nocache_different", func(t *testing.T) {
+		t.Parallel()
+		req1 := newTestRequest(t, "GET", app.URL("/pdf?nocache=1"), nil)
+		resp1 := mustDoRequest(t, app, req1)
+		body1, _ := io.ReadAll(resp1.Body)
+
+		req2 := newTestRequest(t, "GET", app.URL("/pdf?nocache=1"), nil)
+		resp2 := mustDoRequest(t, app, req2)
+		body2, _ := io.ReadAll(resp2.Body)
+
+		if bytes.Equal(body1, body2) {
+			t.Fatal("nocache requests should produce different PDFs")
+		}
+	})
+
+	t.Run("pages_body_increases", func(t *testing.T) {
+		t.Parallel()
+		req1 := newTestRequest(t, "GET", app.URL("/pdf?pages=1"), nil)
+		resp1 := mustDoRequest(t, app, req1)
+		body1, _ := io.ReadAll(resp1.Body)
+
+		req2 := newTestRequest(t, "GET", app.URL("/pdf?pages=5"), nil)
+		resp2 := mustDoRequest(t, app, req2)
+		body2, _ := io.ReadAll(resp2.Body)
+
+		if len(body2) <= len(body1) {
+			t.Fatalf("expected 5 pages (%d) > 1 page (%d)", len(body2), len(body1))
+		}
+	})
+
+	// Invalid params
+	t.Run("invalid_pages_0", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/pdf?pages=0"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+	t.Run("invalid_pages_101", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/pdf?pages=101"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+	t.Run("invalid_pages_abc", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/pdf?pages=abc"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+	t.Run("invalid_size", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/pdf?size=huge"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+}
+
+// PDF cache tests
+func TestPDFCache(t *testing.T) {
+	t.Parallel()
+
+	t.Run("hit_miss", func(t *testing.T) {
+		t.Parallel()
+		cache := newPDFCache(4)
+		key := pdfCacheKey{pages: 1, size: "medium", seed: 42}
+
+		// Miss
+		_, ok := cache.get(key)
+		if ok {
+			t.Fatal("expected cache miss")
+		}
+
+		// Put
+		cache.put(key, pdfCacheEntry{data: []byte("pdf")})
+
+		// Hit
+		entry, ok := cache.get(key)
+		if !ok {
+			t.Fatal("expected cache hit")
+		}
+		if string(entry.data) != "pdf" {
+			t.Fatalf("expected pdf, got %q", string(entry.data))
+		}
+	})
+
+	t.Run("eviction", func(t *testing.T) {
+		t.Parallel()
+		cache := newPDFCache(2)
+		k1 := pdfCacheKey{pages: 1, size: "small", seed: 1}
+		k2 := pdfCacheKey{pages: 2, size: "small", seed: 2}
+		k3 := pdfCacheKey{pages: 3, size: "small", seed: 3}
+
+		cache.put(k1, pdfCacheEntry{data: []byte("1")})
+		cache.put(k2, pdfCacheEntry{data: []byte("2")})
+
+		// This should evict one entry
+		cache.put(k3, pdfCacheEntry{data: []byte("3")})
+
+		// Cache should have exactly 2 entries
+		count := 0
+		for _, k := range []pdfCacheKey{k1, k2, k3} {
+			if _, ok := cache.get(k); ok {
+				count++
+			}
+		}
+		if count != 2 {
+			t.Fatalf("expected 2 entries after eviction, got %d", count)
+		}
+	})
+}
+
+// PDF generation unit tests
+func TestGeneratePDF(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default", func(t *testing.T) {
+		t.Parallel()
+		data, err := generatePDF(1, "medium", 42)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.HasPrefix(string(data), "%PDF-1.4") {
+			t.Fatal("expected PDF-1.4 header")
+		}
+		if !strings.HasSuffix(string(data), "%%EOF\n") {
+			t.Fatal("expected EOF trailer")
+		}
+	})
+
+	t.Run("multi_page", func(t *testing.T) {
+		t.Parallel()
+		data, err := generatePDF(5, "medium", 42)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(string(data), "Page 5 of 5") {
+			t.Fatal("expected page 5 content")
+		}
+	})
+
+	t.Run("sizes", func(t *testing.T) {
+		t.Parallel()
+		small, _ := generatePDF(1, "small", 42)
+		medium, _ := generatePDF(1, "medium", 42)
+		large, _ := generatePDF(1, "large", 42)
+
+		if len(medium) <= len(small) {
+			t.Fatalf("medium (%d) should be > small (%d)", len(medium), len(small))
+		}
+		if len(large) <= len(medium) {
+			t.Fatalf("large (%d) should be > medium (%d)", len(large), len(medium))
+		}
+	})
+
+	t.Run("deterministic", func(t *testing.T) {
+		t.Parallel()
+		data1, _ := generatePDF(2, "medium", 42)
+		data2, _ := generatePDF(2, "medium", 42)
+		if !bytes.Equal(data1, data2) {
+			t.Fatal("same seed should produce identical PDF")
+		}
+	})
+
+	t.Run("different_seed", func(t *testing.T) {
+		t.Parallel()
+		data1, _ := generatePDF(1, "medium", 42)
+		data2, _ := generatePDF(1, "medium", 99)
+		if bytes.Equal(data1, data2) {
+			t.Fatal("different seeds should produce different PDFs")
+		}
+	})
+}
+
+// Version populated test
+func TestVersionPopulated(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t, WithVersion("test-version-1.0"))
+
+	req := newTestRequest(t, "GET", app.URL("/version"), nil)
+	resp := mustDoRequest(t, app, req)
+	assert.StatusCode(t, resp, http.StatusOK)
+	assert.BodyContains(t, resp, "test-version-1.0")
+}
+
+// Pipeline benchmarks for new terminals
+func BenchmarkPipelineNewTerminals(b *testing.B) {
+	paths := []string{
+		"/delay/0/version",
+		"/status/422/problem",
+		"/delay/0/negotiate",
+	}
+	for _, p := range paths {
+		b.Run(p, func(b *testing.B) {
+			for b.Loop() {
+				parsePipeline(p)
+			}
+		})
+	}
 }

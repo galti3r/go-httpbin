@@ -72,7 +72,7 @@ func StatusCode(t *testing.T, resp *http.Response, code int) {
 }
 
 func isSafeContentType(ct string) bool {
-	return strings.HasPrefix(ct, "application/json") || strings.HasPrefix(ct, "text/plain") || strings.HasPrefix(ct, "application/octet-stream")
+	return strings.HasPrefix(ct, "application/json") || strings.HasPrefix(ct, "text/plain") || strings.HasPrefix(ct, "application/octet-stream") || strings.HasPrefix(ct, "application/problem+json")
 }
 
 // Header asserts that a header key has a specific value in a response.
