@@ -1,6 +1,7 @@
 package httpbin
 
 import (
+	"encoding/base64"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -35,10 +36,17 @@ type pipelineResult struct {
 	terminal  pipelineStep
 }
 
-// pipelineModifiers are the recognized modifier names.
-var pipelineModifiers = map[string]bool{
-	"delay":          true,
-	"response_delay": true,
+// modifierDef describes a modifier with its argument count.
+type modifierDef struct {
+	args int // number of arguments the modifier consumes
+}
+
+// pipelineModifierDefs defines recognized modifiers.
+var pipelineModifierDefs = map[string]modifierDef{
+	"delay":          {args: 1},
+	"response_delay": {args: 1},
+	"status":         {args: 1}, // dual-role: modifier or terminal
+	"header":         {args: 1}, // modifier only, arg=name:value
 }
 
 // pipelineTerminals maps terminal names to their definitions.
@@ -98,6 +106,9 @@ var pipelineTerminals = map[string]terminalDef{
 	"pdf":        {args: 0},
 	"trailers":   {args: 0},
 
+	// Body terminal (base64-encoded body content)
+	"body": {args: 1, pathValues: []string{"data"}},
+
 	// Variable-arg terminals (consume all remaining segments)
 	"image":             {args: -1},
 	"redirect":          {args: -1},
@@ -137,18 +148,27 @@ func parsePipeline(urlPath string) (*pipelineResult, error) {
 	for i < len(segments) {
 		seg := segments[i]
 
-		// Check if this segment is a modifier
-		if pipelineModifiers[seg] {
-			// Modifier must have exactly one value argument
-			if i+1 >= len(segments) {
-				return nil, fmt.Errorf("modifier %q requires a value", seg)
+		// Check if this segment is a modifier (with lookahead for dual-role)
+		if modDef, isModifier := pipelineModifierDefs[seg]; isModifier {
+			_, isTerminal := pipelineTerminals[seg]
+
+			// Lookahead: treat as modifier if there are enough segments
+			// after consuming its args for a terminal to follow.
+			treatAsModifier := !isTerminal || (i+1+modDef.args) < len(segments)
+
+			if treatAsModifier {
+				// Modifier must have its value argument
+				if i+1 >= len(segments) {
+					return nil, fmt.Errorf("modifier %q requires a value", seg)
+				}
+				result.modifiers = append(result.modifiers, pipelineStep{
+					name: seg,
+					args: []string{segments[i+1]},
+				})
+				i += 2
+				continue
 			}
-			result.modifiers = append(result.modifiers, pipelineStep{
-				name: seg,
-				args: []string{segments[i+1]},
-			})
-			i += 2
-			continue
+			// Fall through to terminal matching
 		}
 
 		// Not a modifier — try to match a terminal (longest-prefix first)
@@ -222,9 +242,12 @@ func (h *HTTPBin) Pipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate total delay budget (using max of ranges)
+	// Calculate total delay budget (using max of ranges) for delay/response_delay modifiers
 	var totalDelay time.Duration
 	for _, mod := range result.modifiers {
+		if mod.name != "delay" && mod.name != "response_delay" {
+			continue
+		}
 		_, maxD, err := parseDelayRange(mod.args[0], h.MaxDuration)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid %s duration: %w", mod.name, err))
@@ -238,9 +261,38 @@ func (h *HTTPBin) Pipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate header modifiers
+	for _, mod := range result.modifiers {
+		if mod.name == "header" {
+			name, _, found := strings.Cut(mod.args[0], ":")
+			if !found || name == "" {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("invalid header format %q: expected name:value", mod.args[0]))
+				return
+			}
+			if !isAllowedMixHeader(name) {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("header %q is not allowed", name))
+				return
+			}
+			// Check for CRLF injection
+			if strings.ContainsAny(mod.args[0], "\r\n") {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("header value contains invalid characters"))
+				return
+			}
+		}
+		if mod.name == "status" {
+			if _, err := parseStatusCode(mod.args[0]); err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("invalid status modifier: %w", err))
+				return
+			}
+		}
+	}
+
 	// Apply delays
 	var actualDelay time.Duration
 	for _, mod := range result.modifiers {
+		if mod.name != "delay" && mod.name != "response_delay" {
+			continue
+		}
 		minD, maxD, _ := parseDelayRange(mod.args[0], h.MaxDuration)
 		delay := minD
 		if maxD > minD {
@@ -263,7 +315,28 @@ func (h *HTTPBin) Pipeline(w http.ResponseWriter, r *http.Request) {
 		}))
 	}
 
-	// Check method restriction
+	// Apply header modifiers
+	for _, mod := range result.modifiers {
+		if mod.name == "header" {
+			name, val, _ := strings.Cut(mod.args[0], ":")
+			w.Header().Set(name, val)
+		}
+	}
+
+	// Apply status override wrapper if status modifier is present
+	responseWriter := http.ResponseWriter(w)
+	for _, mod := range result.modifiers {
+		if mod.name == "status" {
+			code, _ := parseStatusCode(mod.args[0])
+			responseWriter = &statusOverrideResponseWriter{
+				ResponseWriter: responseWriter,
+				statusOverride: code,
+			}
+			break // only first status modifier applies
+		}
+	}
+
+	// Check method restriction (use original writer, not status-overridden)
 	def := pipelineTerminals[result.terminal.name]
 	if def.method != "" && r.Method != def.method {
 		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed for /%s", r.Method, result.terminal.name))
@@ -271,7 +344,38 @@ func (h *HTTPBin) Pipeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	modifierPrefix := buildModifierPrefix(result.modifiers)
-	h.dispatchTerminal(w, r, result.terminal, modifierPrefix)
+	h.dispatchTerminal(responseWriter, r, result.terminal, modifierPrefix)
+}
+
+// statusOverrideResponseWriter wraps an http.ResponseWriter to override the status code.
+type statusOverrideResponseWriter struct {
+	http.ResponseWriter
+	statusOverride int
+	headersDone    bool
+}
+
+func (w *statusOverrideResponseWriter) WriteHeader(_ int) {
+	if !w.headersDone {
+		w.headersDone = true
+		w.ResponseWriter.WriteHeader(w.statusOverride)
+	}
+}
+
+func (w *statusOverrideResponseWriter) Write(b []byte) (int, error) {
+	if !w.headersDone {
+		w.WriteHeader(w.statusOverride)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *statusOverrideResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *statusOverrideResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // dispatchTerminal dispatches to the appropriate handler for a terminal.
@@ -310,6 +414,9 @@ func (h *HTTPBin) dispatchTerminal(w http.ResponseWriter, r *http.Request, termi
 		return
 	case "digest-auth":
 		h.dispatchDigestAuthTerminal(w, r, terminal.args)
+		return
+	case "body":
+		h.dispatchBodyTerminal(w, r, terminal.args)
 		return
 	}
 
@@ -408,11 +515,25 @@ var imageExtToKind = map[string]string{
 	".avif": "avif",
 }
 
-// dispatchImageTerminal handles the image terminal with vanity URL support.
+// imagePathTokens defines recognized tokens in image pipeline paths.
+// true = consumes 1 value arg, false = flag only (no value).
+var imagePathTokens = map[string]bool{
+	"size":     true,
+	"gradient": true,
+	"color1":   true,
+	"color2":   true,
+	"noise":    true,
+	"no-cache": false,
+}
+
+// dispatchImageTerminal handles the image terminal with vanity URL support
+// and a token consumer loop for path-based parameters.
 // Patterns:
 //   - /image/png → existing kind
 //   - /image/photo.png → kind from extension
 //   - /image/size/small/photo.png → generated image with size
+//   - /image/gradient/warm/size/medium/photo.png → gradient + size
+//   - /image/no-cache/gradient/cool/photo.jpeg → nocache + gradient
 func (h *HTTPBin) dispatchImageTerminal(w http.ResponseWriter, r *http.Request, args []string) {
 	if len(args) == 0 {
 		// /image with no args — use Accept header
@@ -421,65 +542,80 @@ func (h *HTTPBin) dispatchImageTerminal(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Check if first arg is "size" (vanity URL with size parameter)
-	if args[0] == "size" {
-		if len(args) < 3 {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("image size URL requires /image/size/<size>/<filename>"))
-			return
+	// Token consumer loop: consume recognized tokens from args
+	q := r.URL.Query()
+	i := 0
+	for i < len(args) {
+		token := args[i]
+		takesValue, isToken := imagePathTokens[token]
+		if !isToken {
+			break // first non-token is filename or kind
 		}
-		sizeParam := args[1]
-		filename := args[2]
+		if takesValue {
+			if i+1 >= len(args) {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("image token %q requires a value", token))
+				return
+			}
+			// Path tokens override query params
+			q.Set(token, args[i+1])
+			i += 2
+		} else {
+			// Flag token (no-cache)
+			if token == "no-cache" {
+				q.Set("nocache", "1")
+			}
+			i++
+		}
+	}
 
-		ext := strings.ToLower(path.Ext(filename))
+	// Update query string with consumed tokens
+	r.URL.RawQuery = q.Encode()
+	remaining := args[i:]
+
+	if len(remaining) == 0 {
+		// All args were tokens, no filename/kind — use Accept header
+		r.URL.Path = "/image"
+		h.ImageAccept(w, r)
+		return
+	}
+
+	// Check if remaining[0] has a file extension (vanity URL like photo.png)
+	if ext := strings.ToLower(path.Ext(remaining[0])); ext != "" {
 		kind, ok := imageExtToKind[ext]
 		if !ok {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported image extension: %s", ext))
 			return
 		}
-
-		// Inject size into query params and kind into path value
-		q := r.URL.Query()
-		q.Set("size", sizeParam)
-		r.URL.RawQuery = q.Encode()
 		r.SetPathValue("kind", kind)
 		r.URL.Path = "/image/" + kind
-		h.Image(w, r)
-		return
-	}
-
-	// Check if first arg has a file extension (vanity URL like /image/photo.png)
-	if ext := strings.ToLower(path.Ext(args[0])); ext != "" {
-		kind, ok := imageExtToKind[ext]
-		if !ok {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported image extension: %s", ext))
-			return
+		// If size or gradient params present, use Image handler (dynamic generation)
+		if q.Get("size") != "" || q.Get("gradient") != "" || q.Get("color1") != "" {
+			h.Image(w, r)
+		} else {
+			doImage(w, kind)
 		}
-		r.SetPathValue("kind", kind)
-		r.URL.Path = "/image/" + kind
-		doImage(w, kind)
 		return
 	}
 
-	// Check if first arg is a known image kind (e.g., /image/png)
-	switch args[0] {
+	// Check if remaining[0] is a known image kind (e.g., /image/png)
+	switch remaining[0] {
 	case "png", "jpeg", "svg", "webp", "avif":
-		if len(args) > 1 {
+		if len(remaining) > 1 {
 			writeError(w, http.StatusNotFound, nil)
 			return
 		}
-		r.SetPathValue("kind", args[0])
-		r.URL.Path = "/image/" + args[0]
-		// If there's a size query param, delegate to Image handler
-		if r.URL.Query().Get("size") != "" {
+		r.SetPathValue("kind", remaining[0])
+		r.URL.Path = "/image/" + remaining[0]
+		if q.Get("size") != "" || q.Get("gradient") != "" || q.Get("color1") != "" {
 			h.Image(w, r)
 		} else {
-			doImage(w, args[0])
+			doImage(w, remaining[0])
 		}
 		return
 	}
 
 	// Unknown image argument
-	writeError(w, http.StatusBadRequest, fmt.Errorf("unknown image parameter: %s", args[0]))
+	writeError(w, http.StatusBadRequest, fmt.Errorf("unknown image parameter: %s", remaining[0]))
 }
 
 // dispatchRedirectTerminal handles redirect terminals with pipeline chaining.
@@ -608,4 +744,33 @@ func (h *HTTPBin) dispatchDigestAuthTerminal(w http.ResponseWriter, r *http.Requ
 		r.URL.Path = "/digest-auth/" + strings.Join(args[:3], "/")
 	}
 	h.DigestAuth(w, r)
+}
+
+// dispatchBodyTerminal handles the /body terminal which returns base64-decoded content.
+func (h *HTTPBin) dispatchBodyTerminal(w http.ResponseWriter, _ *http.Request, args []string) {
+	if len(args) == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("body terminal requires a base64-encoded argument"))
+		return
+	}
+
+	data := args[0]
+
+	// Try URL-safe base64 first, then standard
+	decoded, err := base64.URLEncoding.DecodeString(data)
+	if err != nil {
+		decoded, err = base64.RawURLEncoding.DecodeString(data)
+		if err != nil {
+			decoded, err = base64.StdEncoding.DecodeString(data)
+			if err != nil {
+				decoded, err = base64.RawStdEncoding.DecodeString(data)
+				if err != nil {
+					writeError(w, http.StatusBadRequest, fmt.Errorf("invalid base64 data: %w", err))
+					return
+				}
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", textContentType)
+	w.Write(decoded)
 }

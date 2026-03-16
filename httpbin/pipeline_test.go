@@ -1,8 +1,11 @@
 package httpbin
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -103,6 +106,55 @@ func TestParsePipeline(t *testing.T) {
 			input:     "/status/200",
 			modifiers: nil,
 			terminal:  pipelineStep{name: "status", args: []string{"200"}},
+		},
+
+		// Dual-role status: terminal when last
+		{
+			name:      "status_terminal_alone",
+			input:     "/status/418",
+			modifiers: nil,
+			terminal:  pipelineStep{name: "status", args: []string{"418"}},
+		},
+		// Dual-role status: modifier when followed by more
+		{
+			name:      "status_modifier_with_body",
+			input:     "/status/422/body/SGVsbG8=",
+			modifiers: []pipelineStep{{name: "status", args: []string{"422"}}},
+			terminal:  pipelineStep{name: "body", args: []string{"SGVsbG8="}},
+		},
+		{
+			name:  "delay_status_body",
+			input: "/delay/1/status/422/body/SGVsbG8=",
+			modifiers: []pipelineStep{
+				{name: "delay", args: []string{"1"}},
+				{name: "status", args: []string{"422"}},
+			},
+			terminal: pipelineStep{name: "body", args: []string{"SGVsbG8="}},
+		},
+		{
+			name:  "status_modifier_get",
+			input: "/delay/1/status/422/get",
+			modifiers: []pipelineStep{
+				{name: "delay", args: []string{"1"}},
+				{name: "status", args: []string{"422"}},
+			},
+			terminal: pipelineStep{name: "get", args: nil},
+		},
+		{
+			name:      "header_status",
+			input:     "/header/X-Custom:test/status/200",
+			modifiers: []pipelineStep{{name: "header", args: []string{"X-Custom:test"}}},
+			terminal:  pipelineStep{name: "status", args: []string{"200"}},
+		},
+		{
+			name:  "full_combo",
+			input: "/delay/0/header/X-Test:val/status/201/get",
+			modifiers: []pipelineStep{
+				{name: "delay", args: []string{"0"}},
+				{name: "header", args: []string{"X-Test:val"}},
+				{name: "status", args: []string{"201"}},
+			},
+			terminal: pipelineStep{name: "get", args: nil},
 		},
 
 		// Error cases
@@ -978,6 +1030,471 @@ func TestPipelineStream(t *testing.T) {
 		lines := strings.Split(strings.TrimSpace(body), "\n")
 		if len(lines) != 5 {
 			t.Fatalf("expected 5 lines, got %d", len(lines))
+		}
+	})
+}
+
+// Tests for pipeline expansion: status/header modifiers, body terminal
+func TestPipelineExpansionE2E(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t, WithMaxDuration(10*time.Second))
+
+	t.Run("body_status_422", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/status/422/body/SGVsbG8="), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 422)
+		assert.BodyContains(t, resp, "Hello")
+	})
+
+	t.Run("delay_status_get", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/status/422/get"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 422)
+		assert.ContentType(t, resp, jsonContentType)
+	})
+
+	t.Run("header_status_200", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/header/X-Custom:test/status/200"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 200)
+		assert.Header(t, resp, "X-Custom", "test")
+	})
+
+	t.Run("full_combo", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/header/X-Test:val/status/201/get"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 201)
+		assert.Header(t, resp, "X-Test", "val")
+		assert.ContentType(t, resp, jsonContentType)
+	})
+
+	t.Run("body_url_safe_b64", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/status/200/body/SGVsbG8gV29ybGQ"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 200)
+		assert.BodyContains(t, resp, "Hello World")
+	})
+
+	t.Run("header_disallowed", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/header/Content-Type:text%2Fhtml/status/200"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	// Backward compat: /status/418 still works as terminal
+	t.Run("backward_compat_status_418", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/status/418"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 418)
+	})
+
+	// Backward compat: /delay/0/status/418 still works
+	t.Run("backward_compat_delay_status", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/status/418"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 418)
+	})
+
+	// Body terminal as first segment
+	t.Run("body_alone", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/body/SGVsbG8="), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 200)
+		assert.BodyContains(t, resp, "Hello")
+	})
+
+	// Status modifier with existing delay modifier
+	t.Run("status_422_body_hello", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/status/422/body/SGVsbG8="), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, 422)
+		assert.BodyContains(t, resp, "Hello")
+	})
+}
+
+// Tests for image pipeline gradient tokens
+func TestPipelineImageGradientE2E(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t, WithMaxDuration(10*time.Second))
+
+	t.Run("gradient_warm_png", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/gradient/warm/size/small/photo.png"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/png")
+	})
+
+	t.Run("gradient_with_size", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/gradient/cool/size/medium/photo.jpeg"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/jpeg")
+	})
+
+	t.Run("gradient_with_delay", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/image/gradient/warm/size/small/photo.png"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/png")
+	})
+
+	t.Run("nocache_gradient", func(t *testing.T) {
+		t.Parallel()
+		req1 := newTestRequest(t, "GET", app.URL("/image/no-cache/gradient/warm/size/small/photo.png"), nil)
+		resp1 := mustDoRequest(t, app, req1)
+		assert.StatusCode(t, resp1, http.StatusOK)
+		body1, _ := io.ReadAll(resp1.Body)
+
+		req2 := newTestRequest(t, "GET", app.URL("/image/no-cache/gradient/warm/size/small/photo.png"), nil)
+		resp2 := mustDoRequest(t, app, req2)
+		assert.StatusCode(t, resp2, http.StatusOK)
+		body2, _ := io.ReadAll(resp2.Body)
+
+		if bytes.Equal(body1, body2) {
+			t.Fatal("no-cache requests should produce different images")
+		}
+	})
+
+	t.Run("invalid_preset_pipeline", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/gradient/invalid/size/small/photo.png"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	// Backward compat
+	t.Run("backward_compat_image_png", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/png"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/png")
+	})
+
+	t.Run("backward_compat_image_photo_png", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/photo.png"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/png")
+	})
+
+	t.Run("backward_compat_image_size_small", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/size/small/photo.png"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/png")
+	})
+}
+
+// Tests for image cache behavior
+func TestImageCacheDeterministic(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	req1 := newTestRequest(t, "GET", app.URL("/image/size/small/photo.png"), nil)
+	resp1 := mustDoRequest(t, app, req1)
+	assert.StatusCode(t, resp1, http.StatusOK)
+	body1, _ := io.ReadAll(resp1.Body)
+	etag1 := resp1.Header.Get("ETag")
+
+	req2 := newTestRequest(t, "GET", app.URL("/image/size/small/photo.png"), nil)
+	resp2 := mustDoRequest(t, app, req2)
+	assert.StatusCode(t, resp2, http.StatusOK)
+	body2, _ := io.ReadAll(resp2.Body)
+	etag2 := resp2.Header.Get("ETag")
+
+	if !bytes.Equal(body1, body2) {
+		t.Fatal("deterministic requests should produce identical images")
+	}
+	assert.Equal(t, etag1, etag2, "ETags should match for identical requests")
+}
+
+func TestImageNocache(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	req1 := newTestRequest(t, "GET", app.URL("/image/size/small/photo.png?nocache=1"), nil)
+	resp1 := mustDoRequest(t, app, req1)
+	assert.StatusCode(t, resp1, http.StatusOK)
+	body1, _ := io.ReadAll(resp1.Body)
+	cc1 := resp1.Header.Get("Cache-Control")
+	assert.Equal(t, cc1, "no-cache, no-store, must-revalidate", "wrong cache-control for nocache")
+
+	req2 := newTestRequest(t, "GET", app.URL("/image/size/small/photo.png?nocache=1"), nil)
+	resp2 := mustDoRequest(t, app, req2)
+	body2, _ := io.ReadAll(resp2.Body)
+
+	if bytes.Equal(body1, body2) {
+		t.Fatal("nocache requests should produce different images")
+	}
+}
+
+func TestImageNocachePath(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	req1 := newTestRequest(t, "GET", app.URL("/image/no-cache/size/small/photo.png"), nil)
+	resp1 := mustDoRequest(t, app, req1)
+	assert.StatusCode(t, resp1, http.StatusOK)
+	body1, _ := io.ReadAll(resp1.Body)
+
+	req2 := newTestRequest(t, "GET", app.URL("/image/no-cache/size/small/photo.png"), nil)
+	resp2 := mustDoRequest(t, app, req2)
+	body2, _ := io.ReadAll(resp2.Body)
+
+	if bytes.Equal(body1, body2) {
+		t.Fatal("no-cache path requests should produce different images")
+	}
+}
+
+func TestImageGradientQueryParams(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	t.Run("preset", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/png?gradient=warm&size=small"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/png")
+	})
+
+	t.Run("custom_colors", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/png?color1=FF0000&color2=0000FF&size=small"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+
+	t.Run("noise", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/png?gradient=warm&noise=32&size=small"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+	})
+
+	t.Run("error_invalid_preset", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/png?gradient=nonexistent&size=small"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	t.Run("error_preset_with_colors", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/png?gradient=warm&color1=FF0000&size=small"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+	})
+
+	t.Run("changes_output", func(t *testing.T) {
+		t.Parallel()
+		req1 := newTestRequest(t, "GET", app.URL("/image/png?gradient=warm&size=small"), nil)
+		resp1 := mustDoRequest(t, app, req1)
+		body1, _ := io.ReadAll(resp1.Body)
+
+		req2 := newTestRequest(t, "GET", app.URL("/image/png?gradient=cool&size=small"), nil)
+		resp2 := mustDoRequest(t, app, req2)
+		body2, _ := io.ReadAll(resp2.Body)
+
+		if bytes.Equal(body1, body2) {
+			t.Fatal("different gradients should produce different images")
+		}
+	})
+}
+
+func TestImageAvifStatic(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	req := newTestRequest(t, "GET", app.URL("/image/avif"), nil)
+	resp := mustDoRequest(t, app, req)
+	assert.StatusCode(t, resp, http.StatusOK)
+	assert.ContentType(t, resp, "image/avif")
+
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) <= 36 {
+		t.Fatalf("expected AVIF > 36 bytes (real image), got %d bytes", len(body))
+	}
+}
+
+func TestImageConvertNoTool(t *testing.T) {
+	// Not parallel: mutates the package-level execLookPath variable.
+	origLookPath := execLookPath
+	execLookPath = func(string) (string, error) {
+		return "", errors.New("not found")
+	}
+	app := setupTestApp(t)
+	execLookPath = origLookPath
+
+	t.Run("avif_501", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/avif?size=small"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusNotImplemented)
+		body := must.ReadAll(t, resp.Body)
+		assert.Contains(t, body, "no avif conversion tool", "body")
+	})
+
+	t.Run("webp_501", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/webp?size=small"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusNotImplemented)
+		body := must.ReadAll(t, resp.Body)
+		assert.Contains(t, body, "no webp conversion tool", "body")
+	})
+}
+
+func TestPipelineBodyErrors(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	t.Run("invalid_base64_body", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/body/!!!invalid!!!"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusBadRequest)
+		body := must.ReadAll(t, resp.Body)
+		assert.Contains(t, body, "invalid base64", "body")
+	})
+
+	t.Run("invalid_base64_status_body", func(t *testing.T) {
+		t.Parallel()
+		// status/200 modifier overrides the 400 from the body terminal,
+		// but the response body still contains the base64 error.
+		req := newTestRequest(t, "GET", app.URL("/status/200/body/!!!bad"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		body := must.ReadAll(t, resp.Body)
+		assert.Contains(t, body, "invalid base64", "body")
+	})
+}
+
+func TestImageAcceptAvif(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	req := newTestRequest(t, "GET", app.URL("/image"), nil)
+	req.Header.Set("Accept", "image/avif")
+	resp := mustDoRequest(t, app, req)
+	assert.StatusCode(t, resp, http.StatusOK)
+	assert.ContentType(t, resp, "image/avif")
+}
+
+func TestImageCacheControlValue(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	t.Run("default_cache_control", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/size/small/photo.png"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.Equal(t, resp.Header.Get("Cache-Control"), "public, max-age=86400", "Cache-Control header")
+	})
+
+	t.Run("nocache_cache_control", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/image/size/small/photo.png?nocache=1"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.Equal(t, resp.Header.Get("Cache-Control"), "no-cache, no-store, must-revalidate", "Cache-Control header")
+	})
+}
+
+func TestPipelineMethodRestrictionWithStatusOverride(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	t.Run("post_status_422_get", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "POST", app.URL("/status/422/get"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusMethodNotAllowed)
+	})
+
+	t.Run("put_delay_status_get", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "PUT", app.URL("/delay/0/status/201/get"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusMethodNotAllowed)
+	})
+}
+
+func TestPipelineMultipleHeaders(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	req := newTestRequest(t, "GET", app.URL("/header/X-A:1/header/X-B:2/status/200"), nil)
+	resp := mustDoRequest(t, app, req)
+	assert.StatusCode(t, resp, http.StatusOK)
+	assert.Header(t, resp, "X-A", "1")
+	assert.Header(t, resp, "X-B", "2")
+}
+
+func TestImageAcceptWithGradient(t *testing.T) {
+	t.Parallel()
+	app := setupTestApp(t)
+
+	req := newTestRequest(t, "GET", app.URL("/image?gradient=warm&size=small"), nil)
+	req.Header.Set("Accept", "image/png")
+	resp := mustDoRequest(t, app, req)
+	assert.StatusCode(t, resp, http.StatusOK)
+	assert.ContentType(t, resp, "image/png")
+}
+
+// Benchmark for image generation
+func BenchmarkGenerateImage(b *testing.B) {
+	grad := defaultGradient()
+	sizes := []struct {
+		name string
+		size int
+	}{
+		{"png_small", 50 * 1024},
+		{"png_medium", 500 * 1024},
+		{"jpeg_small", 50 * 1024},
+	}
+	for _, s := range sizes {
+		format := "png"
+		if strings.HasPrefix(s.name, "jpeg") {
+			format = "jpeg"
+		}
+		b.Run(s.name, func(b *testing.B) {
+			for b.Loop() {
+				generateImage(format, s.size, grad, 42)
+			}
+		})
+	}
+}
+
+func BenchmarkCachedGenerateImage(b *testing.B) {
+	cache := newImageCache(256)
+	grad := defaultGradient()
+	key := imageCacheKey{format: "png", targetSize: 50 * 1024, grad: grad}
+
+	// Pre-populate cache
+	data, ct, _ := generateImage("png", 50*1024, grad, 42)
+	cache.put(key, imageCacheEntry{data: data, contentType: ct, etag: `"test"`})
+
+	b.Run("cached_hit", func(b *testing.B) {
+		for b.Loop() {
+			cache.get(key)
 		}
 	})
 }

@@ -1087,10 +1087,9 @@ func (h *HTTPBin) ImageAccept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If size parameter is present, delegate to Image handler logic
-	sizeParam := r.URL.Query().Get("size")
-	if sizeParam != "" {
-		// Inject the kind into PathValue by setting up a new request
+	// If size or gradient parameter is present, delegate to Image handler logic
+	params := r.URL.Query()
+	if params.Get("size") != "" || params.Get("gradient") != "" || params.Get("color1") != "" {
 		r.SetPathValue("kind", kind)
 		h.Image(w, r)
 		return
@@ -1117,8 +1116,20 @@ func (h *HTTPBin) Image(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	params := r.URL.Query()
+
+	// Parse gradient configuration
+	grad, err := parseGradientConfig(params)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// Parse nocache flag
+	nocache := params.Get("nocache") == "1"
+
 	// Check for size parameter
-	sizeParam := r.URL.Query().Get("size")
+	sizeParam := params.Get("size")
 	if sizeParam != "" {
 		var targetSize int
 		switch sizeParam {
@@ -1133,18 +1144,68 @@ func (h *HTTPBin) Image(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Dynamic generation only works for png and jpeg
-		switch kind {
+		// Determine the base format for generation
+		genFormat := kind
+		if kind == "avif" || kind == "webp" {
+			genFormat = "png" // generate PNG then convert
+		}
+
+		switch genFormat {
 		case "png", "jpeg":
-			data, contentType, err := generateImage(kind, targetSize)
+			// Use cache for deterministic requests
+			seed := int64(42)
+			if nocache {
+				seed = time.Now().UnixNano()
+			}
+
+			var data []byte
+			var contentType string
+
+			cacheKey := imageCacheKey{format: kind, targetSize: targetSize, grad: grad}
+
+			if !nocache {
+				if entry, ok := h.imgCache.get(cacheKey); ok {
+					w.Header().Set("Cache-Control", "public, max-age=86400")
+					w.Header().Set("ETag", entry.etag)
+					writeResponse(w, http.StatusOK, entry.contentType, entry.data)
+					return
+				}
+			}
+
+			data, contentType, err = generateImage(genFormat, targetSize, grad, seed)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err)
 				return
 			}
+
+			// Convert to AVIF/WebP if needed
+			if kind == "avif" || kind == "webp" {
+				conv, ok := h.imageConverters[kind]
+				if !ok {
+					writeError(w, http.StatusNotImplemented, fmt.Errorf("no %s conversion tool available; install avifenc/cwebp/magick/ffmpeg", kind))
+					return
+				}
+				converted, convErr := convertImageFormat(r.Context(), data, conv)
+				if convErr != nil {
+					writeError(w, http.StatusInternalServerError, convErr)
+					return
+				}
+				data = converted
+				contentType = "image/" + kind
+			}
+
+			if nocache {
+				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			} else {
+				etag := fmt.Sprintf(`"%s"`, sha1hash(string(data)))
+				h.imgCache.put(cacheKey, imageCacheEntry{data: data, contentType: contentType, etag: etag})
+				w.Header().Set("Cache-Control", "public, max-age=86400")
+				w.Header().Set("ETag", etag)
+			}
 			writeResponse(w, http.StatusOK, contentType, data)
 			return
 		default:
-			writeError(w, http.StatusBadRequest, fmt.Errorf("size parameter only supported for png and jpeg, not %s", kind))
+			writeError(w, http.StatusBadRequest, fmt.Errorf("size parameter only supported for png, jpeg, avif, and webp, not %s", kind))
 			return
 		}
 	}
