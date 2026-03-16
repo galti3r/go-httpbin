@@ -1133,7 +1133,8 @@ func TestStatus(t *testing.T) {
 		url    string
 		status int
 	}{
-		{"/status", http.StatusMovedPermanently},   // Go mux redirects /status to /status/
+		// /status bare path: Go mux redirects to /status/ (301 in Go <=1.25, 307 in Go 1.26+)
+		// Tested separately below to handle version-dependent redirect code
 		{"/status/", http.StatusBadRequest},        // empty pipeline path
 		{"/status/200/foo", http.StatusBadRequest}, // status modifier + unknown terminal "foo"
 		{"/status/3.14", http.StatusBadRequest},
@@ -1150,6 +1151,16 @@ func TestStatus(t *testing.T) {
 			assert.StatusCode(t, resp, test.status)
 		})
 	}
+
+	// /status bare path: Go mux redirect code varies by version
+	t.Run("error/status_bare_redirect", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/status"), nil)
+		resp := mustDoRequest(t, app, req)
+		if resp.StatusCode != http.StatusMovedPermanently && resp.StatusCode != http.StatusTemporaryRedirect {
+			t.Fatalf("expected 301 or 307 redirect for /status, got %d", resp.StatusCode)
+		}
+	})
 
 	t.Run("HTTP 100 Continue status code supported", func(t *testing.T) {
 		// The stdlib http client automagically handles 100 Continue responses
