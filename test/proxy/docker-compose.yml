@@ -2,7 +2,7 @@ services:
   httpbin:
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.tools
     environment:
       - RATE_LIMIT_RATE=0
     expose:
