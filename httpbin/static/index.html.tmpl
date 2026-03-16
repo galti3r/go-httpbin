@@ -52,7 +52,7 @@
 
 
 <div class='mp'>
-<h1>go-httpbin(1)</h1>
+<h1>go-httpbin(1){{if .Version}} <small>v{{.Version}}</small>{{end}}</h1>
 <p>A golang port of the venerable <a href="https://httpbin.org/">httpbin.org</a> HTTP request &amp; response testing service.</p>
 
 <h2 id="ENDPOINTS">ENDPOINTS</h2>
@@ -112,7 +112,7 @@
 <li><a href="{{.Prefix}}/mix/s=200/h=X-Custom:value/d=1s"><code>{{.Prefix}}/mix/s=:code/h=:header:value/d=:delay/b64=:body</code></a> Composable endpoint that combines status code, headers, delays, and body in a single URL.</li>
 <li><a href="{{.Prefix}}/negotiate"><code>{{.Prefix}}/negotiate</code></a> Performs content negotiation based on the Accept header.</li>
 <li><code>{{.Prefix}}/patch</code> Returns request data.  Allows only <code>PATCH</code> requests.</li>
-<li><a href="{{.Prefix}}/pdf"><code>{{.Prefix}}/pdf?pages=n&amp;size=small|medium|large&amp;seed=int&amp;nocache=1</code></a> Returns a dynamically generated PDF document. <em>pages</em> (1-100, default 1), <em>size</em> (content density), <em>seed</em> (deterministic, default 42), <em>nocache</em> (unique each time).</li>
+<li><a href="{{.Prefix}}/pdf"><code>{{.Prefix}}/pdf?pages=n&amp;size=small|medium|large&amp;seed=int&amp;nocache=1</code></a> Returns a dynamically generated PDF document. <em>pages</em> (1-100, default 1), <em>size</em> (content density), <em>seed</em> (deterministic, default 42), <em>nocache</em> or <em>no-cache</em> (unique each time).</li>
 <li><code>{{.Prefix}}/post</code> Returns request data.  Allows only <code>POST</code> requests.</li>
 <li><code>{{.Prefix}}/put</code> Returns request data.  Allows only <code>PUT</code> requests.</li>
 <li><a href="{{.Prefix}}/problem?status=422&amp;title=Validation+Failed"><code>{{.Prefix}}/problem?status=:code&amp;title=:title&amp;detail=:detail</code></a> Returns a Problem Details (RFC 9457) JSON response. Pipeline-compatible: <code>/status/422/problem?title=Test</code> sets both HTTP and JSON status.</li>
@@ -196,6 +196,17 @@ Date: Tue, 13 Jul 2021 13:12:37 GMT
 Content-Length: 0
 </code></pre>
 
+<h3>$ curl http://localhost:8080/version</h3>
+<pre><code>{"version":"abc1234","go_version":"go1.26"}</code></pre>
+
+<h3>$ curl -o doc.pdf "http://localhost:8080/pdf?pages=3&amp;size=large"</h3>
+<pre><code># Downloads a 3-page large PDF document</code></pre>
+
+<h3>$ curl http://localhost:8080/problem?status=422&amp;title=Validation+Failed</h3>
+<pre><code>{"type":"about:blank","title":"Validation Failed","status":422,"detail":""}</code></pre>
+
+<h3>$ curl -X POST -H 'Content-Type: text/plain' -d 'hello' http://localhost:8080/echo</h3>
+<pre><code>hello</code></pre>
 
 <h2 id="PIPELINE">PIPELINE: COMPOSABLE URLs</h2>
 
@@ -209,6 +220,7 @@ specify a <strong>terminal</strong> endpoint.</p>
 <li><code>response_delay/:duration</code> &mdash; Same as delay (alternative name)</li>
 <li><code>status/:code</code> &mdash; Override the response status code</li>
 <li><code>header/:name:value</code> &mdash; Set a custom response header (X-* headers or allowlisted names)</li>
+<li><code>no-cache</code> &mdash; Disable caching (equivalent to <code>?nocache=1</code>)</li>
 </ul>
 
 <h3>Terminals</h3>
@@ -251,6 +263,21 @@ specify a <strong>terminal</strong> endpoint.</p>
 <li><a href="{{.Prefix}}/redirect/3/status/200"><code>{{.Prefix}}/redirect/3/status/200</code></a> &mdash; Redirect 3 times, ending with status 200</li>
 <li><a href="{{.Prefix}}/delay/1/redirect/3/image/photo.png"><code>{{.Prefix}}/delay/1/redirect/3/image/photo.png</code></a> &mdash; Wait 1s, redirect 3 times, serve PNG image</li>
 <li><a href="{{.Prefix}}/delay/2-4/bytes/1024"><code>{{.Prefix}}/delay/2-4/bytes/1024</code></a> &mdash; Random 2-4s delay, then 1024 random bytes</li>
+<li><a href="{{.Prefix}}/status/201/json"><code>{{.Prefix}}/status/201/json</code></a> &mdash; JSON with status 201</li>
+<li><a href="{{.Prefix}}/delay/500ms/status/503"><code>{{.Prefix}}/delay/500ms/status/503</code></a> &mdash; Wait 500ms + server error</li>
+<li><a href="{{.Prefix}}/header/X-Debug:true/uuid"><code>{{.Prefix}}/header/X-Debug:true/uuid</code></a> &mdash; UUID with custom header</li>
+<li><a href="{{.Prefix}}/delay/0/hostname"><code>{{.Prefix}}/delay/0/hostname</code></a> &mdash; Hostname via pipeline</li>
+<li><a href="{{.Prefix}}/delay/0/negotiate"><code>{{.Prefix}}/delay/0/negotiate</code></a> &mdash; Content negotiation via pipeline</li>
+<li><a href="{{.Prefix}}/status/422/problem?title=Validation+Failed"><code>{{.Prefix}}/status/422/problem?title=Validation+Failed</code></a> &mdash; Coherent Problem Details</li>
+<li><a href="{{.Prefix}}/no-cache/pdf?pages=3"><code>{{.Prefix}}/no-cache/pdf?pages=3</code></a> &mdash; Unique PDF each time via pipeline modifier</li>
+<li><code>{{.Prefix}}/pdf?pages=5&amp;size=large&amp;no-cache=1</code> &mdash; PDF with no-cache query param</li>
+<li><code>{{.Prefix}}/delay/abc/get</code> &mdash; 400 error: invalid delay value</li>
+<li><code>{{.Prefix}}/delay/999/get</code> &mdash; 400 error: delay exceeds maximum</li>
+</ul>
+
+<h3>Known Limitations</h3>
+<ul>
+<li>Browsers (Chrome, Edge) won't render binary content (PDF, images) inline with non-200 status codes. Use <code>curl</code> to verify the response. This is a browser limitation, not a server bug.</li>
 </ul>
 
 <h2 id="AUTHOR">AUTHOR</h2>

@@ -50,6 +50,8 @@ var pipelineModifierDefs = map[string]modifierDef{
 	"response_delay": {args: 1},
 	"status":         {args: 1}, // dual-role: modifier or terminal
 	"header":         {args: 1}, // modifier only, arg=name:value
+	"no-cache":       {args: 0}, // flag modifier, no value
+	"nocache":        {args: 0}, // alias for no-cache
 }
 
 // pipelineTerminals maps terminal names to their definitions.
@@ -172,15 +174,24 @@ func parsePipeline(urlPath string) (*pipelineResult, error) {
 			treatAsModifier := !isTerminal || (i+1+modDef.args) < len(segments)
 
 			if treatAsModifier {
-				// Modifier must have its value argument
-				if i+1 >= len(segments) {
-					return nil, fmt.Errorf("modifier %q requires a value", seg)
+				if modDef.args > 0 {
+					// Modifier must have its value argument
+					if i+modDef.args >= len(segments) {
+						return nil, fmt.Errorf("modifier %q requires a value", seg)
+					}
+					result.modifiers = append(result.modifiers, pipelineStep{
+						name: seg,
+						args: segments[i+1 : i+1+modDef.args],
+					})
+					i += 1 + modDef.args
+				} else {
+					// Flag modifier (0 args) like no-cache
+					result.modifiers = append(result.modifiers, pipelineStep{
+						name: seg,
+						args: nil,
+					})
+					i++
 				}
-				result.modifiers = append(result.modifiers, pipelineStep{
-					name: seg,
-					args: []string{segments[i+1]},
-				})
-				i += 2
 				continue
 			}
 			// Fall through to terminal matching
@@ -305,6 +316,10 @@ func (h *HTTPBin) Pipeline(w http.ResponseWriter, r *http.Request) {
 				statusCode = code
 				hasStatus = true
 			}
+		case "no-cache", "nocache":
+			q := r.URL.Query()
+			q.Set("nocache", "1")
+			r.URL.RawQuery = q.Encode()
 		}
 	}
 

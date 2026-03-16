@@ -90,13 +90,13 @@ watch:
 # docker images
 # =============================================================================
 image:
-	DOCKER_BUILDKIT=1 docker build -t $(DOCKER_TAG) .
+	DOCKER_BUILDKIT=1 docker build --build-arg VERSION=$(VERSION) -t $(DOCKER_TAG) .
 .PHONY: image
 
 imagepush:
 	docker buildx create --name httpbin
 	docker buildx use httpbin
-	docker buildx build --push --platform linux/amd64,linux/arm64 -t $(DOCKER_TAG) .
+	docker buildx build --push --platform linux/amd64,linux/arm64 --build-arg VERSION=$(VERSION) -t $(DOCKER_TAG) .
 	docker buildx rm httpbin
 .PHONY: imagepush
 
@@ -116,7 +116,7 @@ testall: test lint teste2e
 # podman support
 # =============================================================================
 imagepodman:
-	podman build -t go-httpbin:test .
+	podman build --build-arg VERSION=$(VERSION) -t go-httpbin:test .
 .PHONY: imagepodman
 
 

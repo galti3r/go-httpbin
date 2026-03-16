@@ -1,12 +1,14 @@
 # syntax = docker/dockerfile:1.3
 FROM golang:1.26 AS build
 
+ARG VERSION=dev
+
 WORKDIR /go/src/github.com/mccutchen/go-httpbin
 
 COPY . .
 
 RUN --mount=type=cache,id=gobuild,target=/root/.cache/go-build \
-    make build buildtests
+    make build buildtests VERSION=${VERSION}
 
 FROM gcr.io/distroless/static:nonroot
 
