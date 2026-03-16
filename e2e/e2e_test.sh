@@ -256,6 +256,15 @@ assert_status "GET /version" 200 "$BASE_URL/version"
 # 14. /version contains "go_version"
 assert_body_contains "/version contains go_version" "go_version" "$BASE_URL/version"
 
+# 14b. /version field is non-empty
+TOTAL=$((TOTAL+1))
+version_val=$(curl -s "$BASE_URL/version" | grep -o '"version":"[^"]*"' | sed 's/"version":"//;s/"//') || true
+if [ -n "$version_val" ]; then
+    PASS=$((PASS+1)); echo "  PASS: /version field is non-empty ($version_val)"
+else
+    FAIL=$((FAIL+1)); echo "  FAIL: /version field is empty"
+fi
+
 # 15. GET /pdf -> 200
 assert_status "GET /pdf" 200 "$BASE_URL/pdf"
 
@@ -309,6 +318,22 @@ assert_header "/negotiate Vary header" "$BASE_URL/negotiate" "Vary" "Accept"
 
 # 29. GET /image/avif -> 200
 assert_status "GET /image/avif" 200 "$BASE_URL/image/avif"
+
+# 29b. /status/201/pdf -> 201 + body contains %PDF-
+assert_status "pipeline: status/201/pdf" 201 "$BASE_URL/status/201/pdf"
+TOTAL=$((TOTAL+1))
+pdf_body=$(curl -s "$BASE_URL/status/201/pdf" 2>/dev/null) || true
+if echo "$pdf_body" | grep -q "%PDF-"; then
+    PASS=$((PASS+1)); echo "  PASS: /status/201/pdf body contains %PDF-"
+else
+    FAIL=$((FAIL+1)); echo "  FAIL: /status/201/pdf body does not contain %PDF-"
+fi
+
+# 29c. /no-cache/pdf -> 200 (no-cache pipeline modifier)
+assert_status "pipeline: no-cache/pdf" 200 "$BASE_URL/no-cache/pdf"
+
+# 29d. /pdf?no-cache=1 -> 200 (no-cache query param)
+assert_status "pdf with no-cache query param" 200 "$BASE_URL/pdf?no-cache=1"
 
 
 # ============================================================================

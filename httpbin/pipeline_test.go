@@ -186,6 +186,44 @@ func TestParsePipeline(t *testing.T) {
 			terminal: pipelineStep{name: "get", args: nil},
 		},
 
+		// no-cache flag modifier (0 args)
+		{
+			name:      "no_cache_pdf",
+			input:     "/no-cache/pdf",
+			modifiers: []pipelineStep{{name: "no-cache", args: nil}},
+			terminal:  pipelineStep{name: "pdf", args: nil},
+		},
+		{
+			name:  "delay_no_cache_pdf",
+			input: "/delay/1/no-cache/pdf",
+			modifiers: []pipelineStep{
+				{name: "delay", args: []string{"1"}},
+				{name: "no-cache", args: nil},
+			},
+			terminal: pipelineStep{name: "pdf", args: nil},
+		},
+		{
+			name:      "no_cache_image",
+			input:     "/no-cache/image/photo.png",
+			modifiers: []pipelineStep{{name: "no-cache", args: nil}},
+			terminal:  pipelineStep{name: "image", args: []string{"photo.png"}},
+		},
+		{
+			name:      "nocache_no_hyphen_pdf",
+			input:     "/nocache/pdf",
+			modifiers: []pipelineStep{{name: "nocache", args: nil}},
+			terminal:  pipelineStep{name: "pdf", args: nil},
+		},
+		{
+			name:  "delay_nocache_no_hyphen_image",
+			input: "/delay/1/nocache/image/photo.png",
+			modifiers: []pipelineStep{
+				{name: "delay", args: []string{"1"}},
+				{name: "nocache", args: nil},
+			},
+			terminal: pipelineStep{name: "image", args: []string{"photo.png"}},
+		},
+
 		// Error cases
 		{name: "modifier_no_value", input: "/delay/", wantErr: true},
 		{name: "no_terminal", input: "/delay/1", wantErr: true},
@@ -430,6 +468,50 @@ func TestPipelineE2E(t *testing.T) {
 		req := newTestRequest(t, "GET", app.URL("/response_delay/0/delay/0/get"), nil)
 		resp := mustDoRequest(t, app, req)
 		assert.StatusCode(t, resp, http.StatusOK)
+	})
+
+	// B.5b — no-cache flag modifier
+	t.Run("no_cache/pdf", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/no-cache/pdf"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "application/pdf")
+	})
+	t.Run("no_cache/delay_pdf", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/no-cache/pdf"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "application/pdf")
+	})
+	t.Run("no_cache/image", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/no-cache/image/size/small/photo.png"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/png")
+	})
+	t.Run("no_cache/query_param_pdf", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/pdf?no-cache=1"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "application/pdf")
+	})
+	t.Run("nocache_no_hyphen/image", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/delay/0/nocache/image/size/small/photo.png"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "image/png")
+	})
+	t.Run("nocache_no_hyphen/pdf", func(t *testing.T) {
+		t.Parallel()
+		req := newTestRequest(t, "GET", app.URL("/nocache/pdf"), nil)
+		resp := mustDoRequest(t, app, req)
+		assert.StatusCode(t, resp, http.StatusOK)
+		assert.ContentType(t, resp, "application/pdf")
 	})
 
 	// B.6 — Query params preserved

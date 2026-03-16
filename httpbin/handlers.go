@@ -1125,8 +1125,8 @@ func (h *HTTPBin) Image(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse nocache flag
-	nocache := params.Get("nocache") == "1"
+	// Parse nocache flag (accept both nocache and no-cache)
+	nocache := params.Get("nocache") == "1" || params.Get("no-cache") == "1"
 
 	// Check for size parameter
 	sizeParam := params.Get("size")
@@ -1591,7 +1591,7 @@ func (h *HTTPBin) PDF(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	nocache := q.Get("nocache") == "1"
+	nocache := q.Get("nocache") == "1" || q.Get("no-cache") == "1"
 
 	var seed int64 = 42
 	if nocache {
