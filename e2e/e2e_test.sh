@@ -259,10 +259,10 @@ assert_body_contains "/version contains go_version" "go_version" "$BASE_URL/vers
 # 14b. /version field is non-empty
 TOTAL=$((TOTAL+1))
 version_val=$(curl -s "$BASE_URL/version" | grep -o '"version": *"[^"]*"' | sed 's/"version": *"//;s/"//') || true
-if [ -n "$version_val" ]; then
+if [ -n "$version_val" ] && [ "$version_val" != "dev" ]; then
     PASS=$((PASS+1)); echo "  PASS: /version field is non-empty ($version_val)"
 else
-    FAIL=$((FAIL+1)); echo "  FAIL: /version field is empty"
+    FAIL=$((FAIL+1)); echo "  FAIL: /version field is empty or default 'dev' (got '$version_val')"
 fi
 
 # 15. GET /pdf -> 200

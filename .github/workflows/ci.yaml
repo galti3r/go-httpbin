@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Build container image
-        run: docker build -t go-httpbin:e2e-test .
+        run: docker build --build-arg VERSION=$(git rev-parse --short HEAD) -t go-httpbin:e2e-test .
 
       - name: Run E2E tests
         run: CONTAINER_RUNTIME=docker DOCKER_TAG=go-httpbin:e2e-test bash e2e/e2e_test.sh
