@@ -132,7 +132,10 @@ func New(opts ...OptionFunc) *HTTPBin {
 	}
 
 	// pre-compute some configuration values and pre-render templates
-	tmplData := struct{ Prefix string }{Prefix: h.prefix}
+	tmplData := struct {
+		Prefix  string
+		Version string
+	}{Prefix: h.prefix, Version: h.version}
 	h.indexHTML = mustRenderTemplate("index.html.tmpl", tmplData)
 	h.formsPostHTML = mustRenderTemplate("forms-post.html.tmpl", tmplData)
 	h.statusSpecialCases = createSpecialCases(h.prefix)
@@ -257,6 +260,8 @@ func (h *HTTPBin) Handler() http.Handler {
 	mux.HandleFunc("/status/", h.Pipeline)
 	mux.HandleFunc("/header/", h.Pipeline)
 	mux.HandleFunc("/body/", h.Pipeline)
+	mux.HandleFunc("/no-cache/", h.Pipeline)
+	mux.HandleFunc("/nocache/", h.Pipeline)
 
 	// existing httpbin endpoints that we do not support
 	mux.HandleFunc("/brotli", notImplementedHandler)
