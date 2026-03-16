@@ -364,6 +364,24 @@ public internet, consider tuning it appropriately:
 
    # Combine delay + redirect chain
    curl -L http://localhost:8080/delay/1/redirect/2/status/200
+
+   # Version info with delay
+   curl http://localhost:8080/delay/1/version
+
+   # Problem Details with coherent HTTP/JSON status
+   curl http://localhost:8080/status/422/problem?title=Validation+Failed
+
+   # Echo request body through pipeline
+   curl -X POST http://localhost:8080/delay/0/echo -d hello
+
+   # Custom response headers via pipeline
+   curl http://localhost:8080/delay/0/response-headers?X-Debug=true
+
+   # PDF with status override
+   curl http://localhost:8080/status/201/pdf?pages=3
+
+   # JSON with custom header and status
+   curl http://localhost:8080/header/X-Request-Id:abc/status/200/json
    ```
 
    All delays are bounded by `-max-duration`/`MAX_DURATION` (default 10s).
@@ -395,7 +413,36 @@ public internet, consider tuning it appropriately:
    Generated images are cached server-side with `Cache-Control` and `ETag`
    headers. Use `?nocache=1` or the `/no-cache/` path token for unique images.
 
-10. **AVIF/WebP dynamic generation**
+10. **Dynamic PDF generation**
+
+    The `/pdf` endpoint generates valid PDF documents dynamically with
+    configurable parameters:
+
+    ```bash
+    # Default: 1-page medium-density PDF (deterministic, seed=42)
+    curl http://localhost:8080/pdf -o document.pdf
+
+    # Multi-page PDF
+    curl http://localhost:8080/pdf?pages=5 -o multi.pdf
+
+    # Large content density
+    curl http://localhost:8080/pdf?pages=3&size=large -o large.pdf
+
+    # Deterministic output (same seed = same PDF)
+    curl http://localhost:8080/pdf?seed=42
+
+    # Unique PDF each time
+    curl http://localhost:8080/pdf?nocache=1
+
+    # Via pipeline with status override
+    curl http://localhost:8080/status/201/pdf?pages=3
+    ```
+
+    Parameters: `pages` (1-100, default 1), `size` (small/medium/large, default
+    medium), `seed` (integer, default 42), `nocache` (1 to generate unique each time).
+    PDFs are cached server-side for deterministic requests.
+
+11. **AVIF/WebP dynamic generation**
 
     Dynamic image generation for AVIF and WebP formats requires external tools
     (`avifenc`/`cwebp`/`magick`/`ffmpeg`). The Docker image includes these
@@ -436,13 +483,15 @@ Compared to [ahmetb/go-httpbin][ahmet]:
  - More complete implementation of endpoints
 
 Additional endpoints not in the original httpbin:
- - `/version`, `/pdf`, `/problem` (RFC 9457), `/echo`, `/close`, `/negotiate`, `/mix`
+ - `/version`, `/pdf`, `/problem` (RFC 9457), `/echo`, `/close`, `/negotiate`, `/upload`, `/mix`
  - Enhanced `/sse` with named events, `Last-Event-ID`, `retry`, and `fail_after` support
  - Enhanced `/delay` with range syntax (e.g. `/delay/2-8`)
+ - Dynamic PDF generation with configurable pages, size, seed, and caching
  - Global `?response_delay=` query parameter on all endpoints
  - Per-IP rate limiting and concurrent request limiting
- - Pipeline composable URLs: chain `delay/`, `response_delay/` modifiers with any endpoint
-   (e.g. `/delay/1/status/418`, `/image/size/large/photo.png`, `/redirect/3/get`)
+ - Pipeline composable URLs: chain `delay/`, `response_delay/`, `status/`, `header/` modifiers
+   with 50+ terminal endpoints (e.g. `/delay/1/status/418`, `/status/422/problem?title=Test`,
+   `/delay/0/echo`, `/header/X-Id:abc/json`)
 
 
 [ahmet]: https://github.com/ahmetb/go-httpbin

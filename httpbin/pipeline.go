@@ -1,11 +1,14 @@
 package httpbin
 
 import (
-	"encoding/base64"
+	"bufio"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
+	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,8 +23,8 @@ type terminalDef struct {
 	// Names for path values to set on the request (e.g. ["code"] for /status).
 	pathValues []string
 
-	// HTTP method restriction ("GET", "POST", etc.) or "" for any method.
-	method string
+	// HTTP method restrictions. Empty/nil means any method is allowed.
+	methods []string
 }
 
 // pipelineStep represents a parsed modifier or terminal in the pipeline.
@@ -55,17 +58,17 @@ var pipelineTerminals = map[string]terminalDef{
 	// Multi-segment names (2 segments)
 	"cookies/set":    {args: 0},
 	"cookies/delete": {args: 0},
-	"encoding/utf8":  {args: 0, method: "GET"},
-	"forms/post":     {args: 0, method: "GET"},
+	"encoding/utf8":  {args: 0, methods: []string{"GET"}},
+	"forms/post":     {args: 0, methods: []string{"GET"}},
 	"dump/request":   {args: 0},
 
 	// Single-segment names: method-restricted
-	"get":    {args: 0, method: "GET"},
-	"head":   {args: 0, method: "HEAD"},
-	"post":   {args: 0, method: "POST"},
-	"put":    {args: 0, method: "PUT"},
-	"delete": {args: 0, method: "DELETE"},
-	"patch":  {args: 0, method: "PATCH"},
+	"get":    {args: 0, methods: []string{"GET"}},
+	"head":   {args: 0, methods: []string{"HEAD"}},
+	"post":   {args: 0, methods: []string{"POST"}},
+	"put":    {args: 0, methods: []string{"PUT"}},
+	"delete": {args: 0, methods: []string{"DELETE"}},
+	"patch":  {args: 0, methods: []string{"PATCH"}},
 
 	// Single-segment names: any method, fixed args
 	"status":       {args: 1, pathValues: []string{"code"}},
@@ -105,6 +108,18 @@ var pipelineTerminals = map[string]terminalDef{
 	"env":        {args: 0},
 	"pdf":        {args: 0},
 	"trailers":   {args: 0},
+	"version":    {args: 0},
+	"problem":    {args: 0},
+	"negotiate":  {args: 0},
+	"close":      {args: 0},
+
+	// Method-restricted no-arg terminals
+	"echo":   {args: 0, methods: []string{"POST", "PUT", "PATCH"}},
+	"upload": {args: 0, methods: []string{"POST", "PUT", "PATCH"}},
+
+	// Query-param-based terminals (no path args)
+	"redirect-to":      {args: 0},
+	"response-headers": {args: 0},
 
 	// Body terminal (base64-encoded body content)
 	"body": {args: 1, pathValues: []string{"data"}},
@@ -234,6 +249,11 @@ func buildModifierPrefix(modifiers []pipelineStep) string {
 	return sb.String()
 }
 
+// parsedDelay holds pre-parsed delay range values to avoid reparsing.
+type parsedDelay struct {
+	min, max time.Duration
+}
+
 // Pipeline is the handler for composable pipeline URLs.
 func (h *HTTPBin) Pipeline(w http.ResponseWriter, r *http.Request) {
 	result, err := parsePipeline(r.URL.Path)
@@ -242,29 +262,26 @@ func (h *HTTPBin) Pipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate total delay budget (using max of ranges) for delay/response_delay modifiers
-	var totalDelay time.Duration
+	// Single-pass validation: validate all modifiers and cache parsed values
+	var (
+		totalDelay time.Duration
+		delays     []parsedDelay
+		headers    [][2]string // [name, value]
+		statusCode int
+		hasStatus  bool
+	)
 	for _, mod := range result.modifiers {
-		if mod.name != "delay" && mod.name != "response_delay" {
-			continue
-		}
-		_, maxD, err := parseDelayRange(mod.args[0], h.MaxDuration)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid %s duration: %w", mod.name, err))
-			return
-		}
-		totalDelay += maxD
-	}
-
-	if totalDelay > h.MaxDuration {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("total delay %s exceeds maximum %s", totalDelay, h.MaxDuration))
-		return
-	}
-
-	// Validate header modifiers
-	for _, mod := range result.modifiers {
-		if mod.name == "header" {
-			name, _, found := strings.Cut(mod.args[0], ":")
+		switch mod.name {
+		case "delay", "response_delay":
+			minD, maxD, err := parseDelayRange(mod.args[0], h.MaxDuration)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("invalid %s duration: %w", mod.name, err))
+				return
+			}
+			totalDelay += maxD
+			delays = append(delays, parsedDelay{min: minD, max: maxD})
+		case "header":
+			name, val, found := strings.Cut(mod.args[0], ":")
 			if !found || name == "" {
 				writeError(w, http.StatusBadRequest, fmt.Errorf("invalid header format %q: expected name:value", mod.args[0]))
 				return
@@ -273,42 +290,48 @@ func (h *HTTPBin) Pipeline(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, fmt.Errorf("header %q is not allowed", name))
 				return
 			}
-			// Check for CRLF injection
 			if strings.ContainsAny(mod.args[0], "\r\n") {
 				writeError(w, http.StatusBadRequest, fmt.Errorf("header value contains invalid characters"))
 				return
 			}
-		}
-		if mod.name == "status" {
-			if _, err := parseStatusCode(mod.args[0]); err != nil {
+			headers = append(headers, [2]string{name, val})
+		case "status":
+			code, err := parseStatusCode(mod.args[0])
+			if err != nil {
 				writeError(w, http.StatusBadRequest, fmt.Errorf("invalid status modifier: %w", err))
 				return
+			}
+			if !hasStatus {
+				statusCode = code
+				hasStatus = true
 			}
 		}
 	}
 
-	// Apply delays
+	if totalDelay > h.MaxDuration {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("total delay %s exceeds maximum %s", totalDelay, h.MaxDuration))
+		return
+	}
+
+	// Apply delays using cached parsed values
 	var actualDelay time.Duration
-	for _, mod := range result.modifiers {
-		if mod.name != "delay" && mod.name != "response_delay" {
-			continue
-		}
-		minD, maxD, _ := parseDelayRange(mod.args[0], h.MaxDuration)
-		delay := minD
-		if maxD > minD {
-			delay = minD + time.Duration(rand.Int63n(int64(maxD-minD+1)))
+	for _, d := range delays {
+		delay := d.min
+		if d.max > d.min {
+			delay = d.min + time.Duration(rand.Int63n(int64(d.max-d.min+1)))
 		}
 		if delay > 0 {
+			timer := time.NewTimer(delay)
 			select {
-			case <-time.After(delay):
+			case <-timer.C:
 			case <-r.Context().Done():
+				timer.Stop()
 				return
 			}
 			actualDelay += delay
 		}
 	}
 
-	// Add Server-Timing header for the pipeline delay
 	if actualDelay > 0 {
 		w.Header().Set("Server-Timing", encodeServerTimings([]serverTiming{
 			{"pipeline_delay", actualDelay, "pipeline delay"},
@@ -316,35 +339,28 @@ func (h *HTTPBin) Pipeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Apply header modifiers
-	for _, mod := range result.modifiers {
-		if mod.name == "header" {
-			name, val, _ := strings.Cut(mod.args[0], ":")
-			w.Header().Set(name, val)
-		}
+	for _, hdr := range headers {
+		w.Header().Set(hdr[0], hdr[1])
 	}
 
-	// Apply status override wrapper if status modifier is present
+	// Apply status override wrapper
 	responseWriter := http.ResponseWriter(w)
-	for _, mod := range result.modifiers {
-		if mod.name == "status" {
-			code, _ := parseStatusCode(mod.args[0])
-			responseWriter = &statusOverrideResponseWriter{
-				ResponseWriter: responseWriter,
-				statusOverride: code,
-			}
-			break // only first status modifier applies
+	if hasStatus {
+		responseWriter = &statusOverrideResponseWriter{
+			ResponseWriter: responseWriter,
+			statusOverride: statusCode,
 		}
 	}
 
 	// Check method restriction (use original writer, not status-overridden)
 	def := pipelineTerminals[result.terminal.name]
-	if def.method != "" && r.Method != def.method {
+	if len(def.methods) > 0 && !slices.Contains(def.methods, r.Method) {
 		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed for /%s", r.Method, result.terminal.name))
 		return
 	}
 
 	modifierPrefix := buildModifierPrefix(result.modifiers)
-	h.dispatchTerminal(responseWriter, r, result.terminal, modifierPrefix)
+	h.dispatchTerminal(responseWriter, r, def, result.terminal, modifierPrefix)
 }
 
 // statusOverrideResponseWriter wraps an http.ResponseWriter to override the status code.
@@ -352,6 +368,11 @@ type statusOverrideResponseWriter struct {
 	http.ResponseWriter
 	statusOverride int
 	headersDone    bool
+}
+
+// StatusOverride returns the status code override for this writer.
+func (w *statusOverrideResponseWriter) StatusOverride() int {
+	return w.statusOverride
 }
 
 func (w *statusOverrideResponseWriter) WriteHeader(_ int) {
@@ -378,10 +399,15 @@ func (w *statusOverrideResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-// dispatchTerminal dispatches to the appropriate handler for a terminal.
-func (h *HTTPBin) dispatchTerminal(w http.ResponseWriter, r *http.Request, terminal pipelineStep, modifierPrefix string) {
-	def := pipelineTerminals[terminal.name]
+func (w *statusOverrideResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying writer does not support hijacking")
+}
 
+// dispatchTerminal dispatches to the appropriate handler for a terminal.
+func (h *HTTPBin) dispatchTerminal(w http.ResponseWriter, r *http.Request, def terminalDef, terminal pipelineStep, modifierPrefix string) {
 	// Set path values for terminals with fixed args
 	for i, pvName := range def.pathValues {
 		if i < len(terminal.args) {
@@ -390,6 +416,7 @@ func (h *HTTPBin) dispatchTerminal(w http.ResponseWriter, r *http.Request, termi
 	}
 
 	// Rewrite r.URL.Path to the canonical path for getURL()
+	// Special-case terminals that need custom dispatch logic (variable args, etc.)
 	switch terminal.name {
 	case "image":
 		h.dispatchImageTerminal(w, r, terminal.args)
@@ -420,88 +447,71 @@ func (h *HTTPBin) dispatchTerminal(w http.ResponseWriter, r *http.Request, termi
 		return
 	}
 
-	// For all other terminals, rewrite path and dispatch
+	// For all other terminals, rewrite path and dispatch via handler registry
 	canonicalPath := "/" + terminal.name
 	for _, a := range terminal.args {
 		canonicalPath += "/" + a
 	}
 	r.URL.Path = canonicalPath
 
-	switch terminal.name {
-	case "get", "head":
-		h.Get(w, r)
-	case "post", "put", "delete", "patch":
-		h.RequestWithBody(w, r)
-	case "status":
-		h.Status(w, r)
-	case "bytes":
-		h.Bytes(w, r)
-	case "stream":
-		h.Stream(w, r)
-	case "stream-bytes":
-		h.StreamBytes(w, r)
-	case "etag":
-		h.ETag(w, r)
-	case "range":
-		h.Range(w, r)
-	case "basic-auth":
-		h.BasicAuth(w, r)
-	case "hidden-basic-auth":
-		h.HiddenBasicAuth(w, r)
-	case "gzip":
-		h.Gzip(w, r)
-	case "deflate":
-		h.Deflate(w, r)
-	case "html":
-		h.HTML(w, r)
-	case "json":
-		h.JSON(w, r)
-	case "xml":
-		h.XML(w, r)
-	case "robots.txt":
-		h.Robots(w, r)
-	case "deny":
-		h.Deny(w, r)
-	case "ip":
-		h.IP(w, r)
-	case "headers":
-		h.Headers(w, r)
-	case "user-agent":
-		h.UserAgent(w, r)
-	case "uuid":
-		h.UUID(w, r)
-	case "hostname":
-		h.Hostname(w, r)
-	case "bearer":
-		h.Bearer(w, r)
-	case "cookies":
-		h.Cookies(w, r)
-	case "cookies/set":
-		h.SetCookies(w, r)
-	case "cookies/delete":
-		h.DeleteCookies(w, r)
-	case "encoding/utf8":
-		h.UTF8(w, r)
-	case "forms/post":
-		h.FormsPost(w, r)
-	case "dump/request":
-		h.DumpRequest(w, r)
-	case "drip":
-		h.Drip(w, r)
-	case "sse":
-		h.SSE(w, r)
-	case "unstable":
-		h.Unstable(w, r)
-	case "anything":
-		h.Anything(w, r)
-	case "env":
-		h.Env(w, r)
-	case "pdf":
-		h.PDF(w, r)
-	case "trailers":
-		h.Trailers(w, r)
-	default:
+	if handler, ok := h.terminalHandlers[terminal.name]; ok {
+		handler(w, r)
+	} else {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("unknown terminal: %s", terminal.name))
+	}
+}
+
+// buildTerminalHandlers creates the handler registry for simple terminal dispatch.
+func (h *HTTPBin) buildTerminalHandlers() map[string]http.HandlerFunc {
+	return map[string]http.HandlerFunc{
+		"get":               h.Get,
+		"head":              h.Get,
+		"post":              h.RequestWithBody,
+		"put":               h.RequestWithBody,
+		"delete":            h.RequestWithBody,
+		"patch":             h.RequestWithBody,
+		"status":            h.Status,
+		"bytes":             h.Bytes,
+		"stream":            h.Stream,
+		"stream-bytes":      h.StreamBytes,
+		"etag":              h.ETag,
+		"range":             h.Range,
+		"basic-auth":        h.BasicAuth,
+		"hidden-basic-auth": h.HiddenBasicAuth,
+		"gzip":              h.Gzip,
+		"deflate":           h.Deflate,
+		"html":              h.HTML,
+		"json":              h.JSON,
+		"xml":               h.XML,
+		"robots.txt":        h.Robots,
+		"deny":              h.Deny,
+		"ip":                h.IP,
+		"headers":           h.Headers,
+		"user-agent":        h.UserAgent,
+		"uuid":              h.UUID,
+		"hostname":          h.Hostname,
+		"bearer":            h.Bearer,
+		"cookies":           h.Cookies,
+		"cookies/set":       h.SetCookies,
+		"cookies/delete":    h.DeleteCookies,
+		"encoding/utf8":     h.UTF8,
+		"forms/post":        h.FormsPost,
+		"dump/request":      h.DumpRequest,
+		"drip":              h.Drip,
+		"sse":               h.SSE,
+		"unstable":          h.Unstable,
+		"anything":          h.Anything,
+		"env":               h.Env,
+		"pdf":               h.PDF,
+		"trailers":          h.Trailers,
+		"version":           h.Version,
+		"problem":           h.ProblemDetails,
+		"negotiate":         h.Negotiate,
+		"echo":              h.Echo,
+		"redirect-to":       h.RedirectTo,
+		"response-headers":  h.ResponseHeaders,
+		"close":             h.Close,
+		"upload":            h.RequestWithBodyDiscard,
 	}
 }
 
@@ -588,12 +598,7 @@ func (h *HTTPBin) dispatchImageTerminal(w http.ResponseWriter, r *http.Request, 
 		}
 		r.SetPathValue("kind", kind)
 		r.URL.Path = "/image/" + kind
-		// If size or gradient params present, use Image handler (dynamic generation)
-		if q.Get("size") != "" || q.Get("gradient") != "" || q.Get("color1") != "" {
-			h.Image(w, r)
-		} else {
-			doImage(w, kind)
-		}
+		h.dispatchImageByKind(w, r, q, kind)
 		return
 	}
 
@@ -606,16 +611,22 @@ func (h *HTTPBin) dispatchImageTerminal(w http.ResponseWriter, r *http.Request, 
 		}
 		r.SetPathValue("kind", remaining[0])
 		r.URL.Path = "/image/" + remaining[0]
-		if q.Get("size") != "" || q.Get("gradient") != "" || q.Get("color1") != "" {
-			h.Image(w, r)
-		} else {
-			doImage(w, remaining[0])
-		}
+		h.dispatchImageByKind(w, r, q, remaining[0])
 		return
 	}
 
 	// Unknown image argument
 	writeError(w, http.StatusBadRequest, fmt.Errorf("unknown image parameter: %s", remaining[0]))
+}
+
+// dispatchImageByKind routes to the dynamic Image handler or static doImage
+// based on whether size/gradient query params are present.
+func (h *HTTPBin) dispatchImageByKind(w http.ResponseWriter, r *http.Request, q url.Values, kind string) {
+	if q.Get("size") != "" || q.Get("gradient") != "" || q.Get("color1") != "" {
+		h.Image(w, r)
+	} else {
+		doImage(w, kind)
+	}
 }
 
 // dispatchRedirectTerminal handles redirect terminals with pipeline chaining.
@@ -753,22 +764,10 @@ func (h *HTTPBin) dispatchBodyTerminal(w http.ResponseWriter, _ *http.Request, a
 		return
 	}
 
-	data := args[0]
-
-	// Try URL-safe base64 first, then standard
-	decoded, err := base64.URLEncoding.DecodeString(data)
+	decoded, err := decodeBase64Flexible(args[0])
 	if err != nil {
-		decoded, err = base64.RawURLEncoding.DecodeString(data)
-		if err != nil {
-			decoded, err = base64.StdEncoding.DecodeString(data)
-			if err != nil {
-				decoded, err = base64.RawStdEncoding.DecodeString(data)
-				if err != nil {
-					writeError(w, http.StatusBadRequest, fmt.Errorf("invalid base64 data: %w", err))
-					return
-				}
-			}
-		}
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid base64 data: %w", err))
+		return
 	}
 
 	w.Header().Set("Content-Type", textContentType)

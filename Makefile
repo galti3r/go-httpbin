@@ -27,7 +27,7 @@ PORT ?= 8080
 # =============================================================================
 build:
 	mkdir -p $(DIST_PATH)
-	CGO_ENABLED=0 go build -ldflags="-s -w" -o $(DIST_PATH)/go-httpbin ./cmd/go-httpbin
+	CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/galti3r/go-httpbin/v3/httpbin/cmd.Version=$(VERSION)" -o $(DIST_PATH)/go-httpbin ./cmd/go-httpbin
 .PHONY: build
 
 buildexamples: build
@@ -35,7 +35,7 @@ buildexamples: build
 .PHONY: buildexamples
 
 buildtests:
-	CGO_ENABLED=0 go test -ldflags="-s -w" -v -c -o $(DIST_PATH)/go-httpbin.test ./httpbin
+	CGO_ENABLED=0 go test -ldflags="-s -w -X github.com/galti3r/go-httpbin/v3/httpbin/cmd.Version=$(VERSION)" -v -c -o $(DIST_PATH)/go-httpbin.test ./httpbin
 .PHONY: buildtests
 
 clean:

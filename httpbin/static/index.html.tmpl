@@ -112,10 +112,10 @@
 <li><a href="{{.Prefix}}/mix/s=200/h=X-Custom:value/d=1s"><code>{{.Prefix}}/mix/s=:code/h=:header:value/d=:delay/b64=:body</code></a> Composable endpoint that combines status code, headers, delays, and body in a single URL.</li>
 <li><a href="{{.Prefix}}/negotiate"><code>{{.Prefix}}/negotiate</code></a> Performs content negotiation based on the Accept header.</li>
 <li><code>{{.Prefix}}/patch</code> Returns request data.  Allows only <code>PATCH</code> requests.</li>
-<li><a href="{{.Prefix}}/pdf"><code>{{.Prefix}}/pdf</code></a> Returns a PDF document.</li>
+<li><a href="{{.Prefix}}/pdf"><code>{{.Prefix}}/pdf?pages=n&amp;size=small|medium|large&amp;seed=int&amp;nocache=1</code></a> Returns a dynamically generated PDF document. <em>pages</em> (1-100, default 1), <em>size</em> (content density), <em>seed</em> (deterministic, default 42), <em>nocache</em> (unique each time).</li>
 <li><code>{{.Prefix}}/post</code> Returns request data.  Allows only <code>POST</code> requests.</li>
 <li><code>{{.Prefix}}/put</code> Returns request data.  Allows only <code>PUT</code> requests.</li>
-<li><a href="{{.Prefix}}/problem?status=422&amp;title=Validation+Failed"><code>{{.Prefix}}/problem?status=:code&amp;title=:title&amp;detail=:detail</code></a> Returns a Problem Details (RFC 9457) JSON response.</li>
+<li><a href="{{.Prefix}}/problem?status=422&amp;title=Validation+Failed"><code>{{.Prefix}}/problem?status=:code&amp;title=:title&amp;detail=:detail</code></a> Returns a Problem Details (RFC 9457) JSON response. Pipeline-compatible: <code>/status/422/problem?title=Test</code> sets both HTTP and JSON status.</li>
 <li><a href="{{.Prefix}}/range/:n"><code>{{.Prefix}}/range/1024?duration=s&amp;chunk_size=code</code></a> Streams <em>n</em> bytes, and allows specifying a <em>Range</em> header to select a subset of the data. Accepts a <em>chunk_size</em> and request <em>duration</em> parameter.</li>
 <li><a href="{{.Prefix}}/redirect-to?status_code=307&amp;url=http%3A%2F%2Fexample.com%2F"><code>{{.Prefix}}/redirect-to?url=foo&status_code=307</code></a> 307 Redirects to the <em>foo</em> URL.</li>
 <li><a href="{{.Prefix}}/redirect-to?url=http%3A%2F%2Fexample.com%2F"><code>{{.Prefix}}/redirect-to?url=foo</code></a> 302 Redirects to the <em>foo</em> URL.</li>
@@ -132,7 +132,7 @@
 <li><code>{{.Prefix}}/upload</code> Discards the body of <code>POST</code>/<code>PUT</code>/<code>PATCH</code> requests, for testing upload performance.</li>
 <li><a href="{{.Prefix}}/user-agent"><code>{{.Prefix}}/user-agent</code></a> Returns user-agent.</li>
 <li><a href="{{.Prefix}}/uuid"><code>{{.Prefix}}/uuid</code></a> Generates a <a href="https://en.wikipedia.org/wiki/Universally_unique_identifier">UUIDv4</a> value.</li>
-<li><a href="{{.Prefix}}/version"><code>{{.Prefix}}/version</code></a> Returns the version of the go-httpbin instance.</li>
+<li><a href="{{.Prefix}}/version"><code>{{.Prefix}}/version</code></a> Returns the version of the go-httpbin instance. Pipeline-compatible (e.g. <code>/delay/1/version</code>).</li>
 <li><a href="{{.Prefix}}/websocket/echo?max_fragment_size=2048&amp;max_message_size=10240"><code>{{.Prefix}}/websocket/echo?max_fragment_size=2048&amp;max_message_size=10240</code></a> A WebSocket echo service.</li>
 <li><a href="{{.Prefix}}/xml"><code>{{.Prefix}}/xml</code></a> Returns some XML</li>
 </ul>
@@ -212,8 +212,27 @@ specify a <strong>terminal</strong> endpoint.</p>
 </ul>
 
 <h3>Terminals</h3>
+<p>All single endpoints work as terminals. Grouped by category:</p>
 <ul>
-<li><code>body/:base64</code> &mdash; Return base64-decoded content as response body</li>
+<li><strong>Request inspection:</strong> get, post, put, delete, patch, head, headers, ip, user-agent, anything, dump/request</li>
+<li><strong>Data formats:</strong> json, xml, html, gzip, deflate, encoding/utf8, body/:base64</li>
+<li><strong>Images:</strong> image, image/:kind, image/size/:size/photo.:ext, image/gradient/:preset/...</li>
+<li><strong>Documents:</strong> pdf</li>
+<li><strong>Info:</strong> version, hostname, uuid, env, bearer, negotiate</li>
+<li><strong>Status &amp; redirects:</strong> status/:code, redirect/:n, absolute-redirect/:n, relative-redirect/:n, redirect-to, response-headers</li>
+<li><strong>Auth:</strong> basic-auth/:u/:p, hidden-basic-auth/:u/:p, digest-auth/:qop/:u/:p</li>
+<li><strong>Streaming:</strong> bytes/:n, stream/:n, stream-bytes/:n, range/:n, drip, sse</li>
+<li><strong>Cookies:</strong> cookies, cookies/set, cookies/delete</li>
+<li><strong>Echo/Upload:</strong> echo (POST/PUT/PATCH), upload (POST/PUT/PATCH)</li>
+<li><strong>Connection:</strong> close, problem</li>
+<li><strong>Other:</strong> robots.txt, deny, cache, etag/:etag, links/:n, unstable, trailers</li>
+</ul>
+
+<h3>Error responses</h3>
+<ul>
+<li><code>400</code> &mdash; Invalid modifier value, unknown segment, missing terminal</li>
+<li><code>405</code> &mdash; Wrong HTTP method for a method-restricted terminal (e.g. GET on /echo)</li>
+<li><code>501</code> &mdash; AVIF/WebP generation without conversion tools</li>
 </ul>
 
 <h3>Examples</h3>
@@ -222,6 +241,11 @@ specify a <strong>terminal</strong> endpoint.</p>
 <li><a href="{{.Prefix}}/delay/500ms/get"><code>{{.Prefix}}/delay/500ms/get</code></a> &mdash; Wait 500ms, then return request data</li>
 <li><a href="{{.Prefix}}/status/422/body/SGVsbG8="><code>{{.Prefix}}/status/422/body/SGVsbG8=</code></a> &mdash; Return "Hello" with status 422</li>
 <li><a href="{{.Prefix}}/header/X-Custom:test/status/201/get"><code>{{.Prefix}}/header/X-Custom:test/status/201/get</code></a> &mdash; Custom header + status override + GET data</li>
+<li><a href="{{.Prefix}}/delay/1/version"><code>{{.Prefix}}/delay/1/version</code></a> &mdash; Wait 1s, then return version info</li>
+<li><a href="{{.Prefix}}/status/422/problem?title=Validation+Failed"><code>{{.Prefix}}/status/422/problem?title=Validation+Failed</code></a> &mdash; HTTP 422 + coherent Problem Details JSON</li>
+<li><a href="{{.Prefix}}/delay/0/response-headers?X-Debug=true"><code>{{.Prefix}}/delay/0/response-headers?X-Debug=true</code></a> &mdash; Custom response headers via pipeline</li>
+<li><a href="{{.Prefix}}/status/201/pdf?pages=3"><code>{{.Prefix}}/status/201/pdf?pages=3</code></a> &mdash; 3-page PDF with status 201</li>
+<li><a href="{{.Prefix}}/header/X-Request-Id:abc/status/200/json"><code>{{.Prefix}}/header/X-Request-Id:abc/status/200/json</code></a> &mdash; JSON with custom header and status</li>
 <li><a href="{{.Prefix}}/image/gradient/warm/size/small/photo.png"><code>{{.Prefix}}/image/gradient/warm/size/small/photo.png</code></a> &mdash; Warm gradient PNG image</li>
 <li><a href="{{.Prefix}}/image/no-cache/gradient/cool/size/small/photo.jpeg"><code>{{.Prefix}}/image/no-cache/gradient/cool/size/small/photo.jpeg</code></a> &mdash; Unique cool gradient JPEG</li>
 <li><a href="{{.Prefix}}/redirect/3/status/200"><code>{{.Prefix}}/redirect/3/status/200</code></a> &mdash; Redirect 3 times, ending with status 200</li>
