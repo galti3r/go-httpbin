@@ -1,0 +1,42 @@
+# Dockerfile.tools — go-httpbin with AVIF/WebP conversion tools
+# Use this image when dynamic image generation for AVIF/WebP is needed.
+# The default Dockerfile produces a minimal distroless image without tools.
+#
+# Build: podman build -f Dockerfile.tools -t go-httpbin:tools .
+# Run:   podman run -p 8080:8080 go-httpbin:tools
+
+FROM golang:1.26 AS build
+
+WORKDIR /go/src/github.com/mccutchen/go-httpbin
+
+COPY . .
+
+RUN --mount=type=cache,id=gobuild,target=/root/.cache/go-build \
+    make build buildtests
+
+# Extract avifenc/cwebp and their shared library dependencies
+FROM debian:bookworm-slim AS tools
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libavif-bin webp && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /export/bin /export/lib && \
+    cp /usr/bin/avifenc /usr/bin/cwebp /export/bin/ && \
+    for bin in /export/bin/*; do \
+        ldd "$bin" 2>/dev/null | awk '/=>/{print $3}' | while read lib; do \
+            [ -f "$lib" ] && cp "$lib" /export/lib/ 2>/dev/null || true; \
+        done; \
+    done
+
+# distroless/cc includes glibc for dynamically-linked tools
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+COPY --from=tools /export/bin/ /usr/local/bin/
+COPY --from=tools /export/lib/ /usr/local/lib/imgtools/
+COPY --from=build /go/src/github.com/mccutchen/go-httpbin/dist/go-httpbin* /bin/
+
+ENV LD_LIBRARY_PATH="/usr/local/lib/imgtools"
+
+EXPOSE 8080
+CMD ["/bin/go-httpbin"]
