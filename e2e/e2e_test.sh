@@ -256,13 +256,14 @@ assert_status "GET /version" 200 "$BASE_URL/version"
 # 14. /version contains "go_version"
 assert_body_contains "/version contains go_version" "go_version" "$BASE_URL/version"
 
-# 14b. /version field is non-empty
+# 14b. /version field matches expected VERSION
 TOTAL=$((TOTAL+1))
 version_val=$(curl -s "$BASE_URL/version" | grep -o '"version": *"[^"]*"' | sed 's/"version": *"//;s/"//') || true
-if [ -n "$version_val" ] && [ "$version_val" != "dev" ]; then
-    PASS=$((PASS+1)); echo "  PASS: /version field is non-empty ($version_val)"
+expected_version="${EXPECTED_VERSION:-$(git rev-parse --short HEAD)}"
+if [ "$version_val" = "$expected_version" ]; then
+    PASS=$((PASS+1)); echo "  PASS: /version field matches expected ($version_val)"
 else
-    FAIL=$((FAIL+1)); echo "  FAIL: /version field is empty or default 'dev' (got '$version_val')"
+    FAIL=$((FAIL+1)); echo "  FAIL: /version field mismatch (got '$version_val', want '$expected_version')"
 fi
 
 # 15. GET /pdf -> 200
